@@ -1,13 +1,16 @@
 # Hermes CLI 프로젝트 작업 환경
 
-작업할 프로젝트의 터미널에서 Hermes를 엽니다. 같은 경로에서 아래 명령을 다시 실행하면 같은 이름의 프로젝트 대화를 이어갑니다.
+웹앱에서 **새 프로젝트**를 누르고 이름에 `test-prj`를 입력해 생성합니다. 폴더를 비워 두면 `/workspaces/test-prj`에 Git 저장소가 생깁니다. 같은 워크스페이스 안에 기존 저장소가 있으면 기본 폴더로 선택할 수 있습니다. 터미널에서도 같은 생성기를 사용합니다.
 
 ```bash
+hermes project create test-prj --use
 cd /workspaces/test-prj
-hermes chat --in "$PWD" --continue "project-$PWD" --create-if-missing
+hermes chat --in "$PWD" --continue "test-prj-세션"
 ```
 
-Hermes 입력창에서 각 CLI에 지시하면 `cli-workers` Kanban 보드의 카드 ID를 돌려줍니다.
+생성기는 프로젝트에 `test-prj` Kanban 보드, `test-prj-세션`이라는 시작 대화 한 개, 프로젝트 전용 QMD 컬렉션을 연결합니다. 첫 커밋이 없으면 빈 커밋을 만들어 Kanban이 바로 Git worktree를 열 수 있게 합니다. 같은 이름과 폴더로 다시 생성하면 기존 항목을 사용합니다. 시작 대화는 웹앱 프로젝트 목록에서도 열 수 있습니다.
+
+Hermes 입력창에서 각 CLI에 작업을 맡기면 프로젝트 보드의 카드 ID가 돌아옵니다. 생성기로 등록하지 않은 폴더의 작업은 공용 `cli-workers` 보드에 접수됩니다.
 
 ```text
 /codex 동기화 실패의 원인을 찾고 수정한 뒤 관련 테스트를 실행해 줘
@@ -18,16 +21,17 @@ Hermes 입력창에서 각 CLI에 지시하면 `cli-workers` Kanban 보드의 �
 
 ```bash
 hermes project-cli submit codex "동기화 실패를 수정하고 테스트해 줘"
-hermes kanban --board cli-workers list
-hermes kanban --board cli-workers show <카드-ID>
-hermes kanban --board cli-workers runs <카드-ID>
+hermes project-cli board
+hermes kanban --board test-prj list
+hermes kanban --board test-prj show <카드-ID>
+hermes kanban --board test-prj runs <카드-ID>
 ```
 
 ## 실행과 재개
 
 - 워커가 프로젝트의 Git checkout에서 `codex exec --json` 또는 `claude -p --verbose --output-format stream-json`을 실행합니다. 같은 checkout의 요청은 접수 순서대로 실행하고, 서로 다른 checkout은 최대 네 곳까지 병렬로 처리합니다. 독립된 변경은 별도 Git worktree에서 Hermes를 열어 맡길 수 있습니다.
 - 같은 Hermes 세션·checkout·CLI의 후속 카드는 저장한 원본 CLI 세션 ID로 재개됩니다. 다른 CLI로 넘길 때는 같은 세션과 checkout에서 마지막으로 완료한 카드의 요약과 테스트 결과를 함께 전달합니다. 셸에서 같은 대화로 이어가려면 제출할 때 동일한 `--session <Hermes-세션-ID>`를 지정합니다.
-- 워커가 성공적으로 종료하고 완료 보고를 반환하면 카드에 결과, 보고된 테스트, 현재 HEAD, CLI 세션 ID와 로그 경로가 기록됩니다. 승인 필요, CLI 오류, 완료 보고 누락, 실행 도중 워커 중단은 `blocked`로 처리합니다. 실제 변경과 실행별 로그를 확인한 뒤 `hermes kanban --board cli-workers unblock <카드-ID>`로 같은 작업을 다시 맡길 수 있습니다.
+- 워커가 성공적으로 종료하고 완료 보고를 반환하면 카드에 결과, 보고된 테스트, 현재 HEAD, CLI 세션 ID와 로그 경로가 기록됩니다. 승인 필요, CLI 오류, 완료 보고 누락, 실행 도중 워커 중단은 `blocked`로 처리합니다. 실제 변경과 실행별 로그를 확인한 뒤 `hermes kanban --board test-prj unblock <카드-ID>`로 같은 작업을 다시 맡길 수 있습니다.
 - 게이트웨이와 CLI 워커는 독립 프로세스입니다. 터미널을 닫거나 게이트웨이를 재시작해도 워커는 계속 실행됩니다. 컨테이너가 멈추면 다음 기동에서 대기 카드를 이어 처리하고 중단된 시도의 기록을 보존합니다.
 
 ## 메신저와 승인
@@ -57,13 +61,13 @@ qmd embed
 
 `/codex`와 `/claude` 워커는 작업 중 직접 확인한 프로젝트 사실과 근거 파일·테스트를 완료 보고에 담습니다. 근거가 있는 발견이 있으면 백그라운드 워커가 완료된 실행마다 Markdown 한 파일을 저장하고, 이 프로젝트의 QMD 컬렉션을 자동 등록·갱신합니다. 문서에는 카드 ID, 워커, 완료 시각, 확인 당시의 Git HEAD(있는 경우)가 함께 기록됩니다. 차단된 작업과 발견이 없는 작업은 건너뜁니다.
 
-새 Hermes 대화에서도 같은 프로젝트 폴더를 열고 “이전에 확인한 재시도 정책을 근거와 함께 찾아줘”처럼 요청할 수 있습니다. 터미널에서는 다음 명령으로 현재 checkout의 지식을 검색합니다. 컬렉션은 첫 발견을 저장할 때 생성되며, 다른 checkout이나 Git worktree는 별도 컬렉션을 사용합니다.
+새 Hermes 대화에서도 같은 프로젝트 폴더를 열고 “이전에 확인한 재시도 정책을 근거와 함께 찾아줘”처럼 요청할 수 있습니다. 프로젝트의 등록 폴더와 연결된 Git worktree는 프로젝트 생성 시 준비된 컬렉션을 함께 사용합니다. 미등록 checkout에는 첫 발견을 저장할 때 개별 컬렉션이 생깁니다. 터미널에서는 다음 명령으로 검색합니다.
 
 ```bash
 qmd query 'vec: 이전에 확인한 재시도 정책' -c "$(hermes project-cli knowledge)" --no-rerank
 ```
 
-카드 완료와 색인은 독립적으로 처리됩니다. Ollama 연결이 끊기면 완료 보고와 Markdown이 남고, 워커가 30초 후 색인을 다시 시도합니다. 워커를 재시작해도 미처리 보고를 읽어 재개합니다. 성공하면 `hermes kanban --board cli-workers show <카드-ID> --json`의 `knowledge_indexed` 이벤트에 검색 가능한 문서 주소가 기록됩니다.
+카드 완료와 색인은 독립적으로 처리됩니다. Ollama 연결이 끊기면 완료 보고와 Markdown이 남고, 워커가 30초 후 색인을 다시 시도합니다. 워커를 재시작해도 미처리 보고를 읽어 재개합니다. 성공하면 `hermes kanban --board test-prj show <카드-ID> --json`의 `knowledge_indexed` 이벤트에 검색 가능한 문서 주소가 기록됩니다.
 
 ## 저장 위치
 
@@ -72,13 +76,15 @@ qmd query 'vec: 이전에 확인한 재시도 정책' -c "$(hermes project-cli k
 | 프로젝트 코드와 Git worktree | 호스트와 연결한 `/workspaces` |
 | Hermes 인증·설정·대화·Kanban DB | `hermes_home` 볼륨의 `/home/ubuntu/.hermes` |
 | QMD 설정·문서 색인·모델 캐시 | 같은 볼륨의 `qmd/index.yml`, `qmd/index.sqlite`, `qmd/models/` |
-| 완료 카드에서 확인한 프로젝트 지식 | 같은 볼륨의 `qmd/knowledge/<컬렉션>/<카드-ID>-r<실행-ID>.md` |
-| CLI 세션 연결 정보·실행별 로그 | 같은 볼륨의 `cli-workers/sessions` 및 `cli-workers/runs/<카드-ID>/<시도-ID>` |
+| 완료 카드에서 확인한 프로젝트 지식 | 같은 볼륨의 `qmd/knowledge/<컬렉션>/`에 보드·카드·실행별 Markdown |
+| CLI 세션 연결 정보·실행별 로그 | 같은 볼륨의 `cli-workers/sessions` 및 `cli-workers/boards/<보드>/runs/`. 공용 보드의 로그는 `cli-workers/runs/` |
 | Codex 및 Claude 원본 인증·대화 | `codex_home`, `claude_home` 볼륨 |
 
 ## 초기 설치
 
 VS Code에서 **Dev Containers: Rebuild Container**를 실행하면 Docker Compose가 영속 볼륨을 만들거나 기존 볼륨을 연결합니다. 초기 설치가 끝나면 아래 순서로 두 CLI와 Hermes를 인증합니다.
+
+초기 설치는 `.devcontainer/setup-projects.sh`에서 Hermes 기본 생성기와 웹앱 폼에 연동 패치를 적용한 다음 웹앱을 빌드합니다.
 
 ### 1. 코딩 에이전트 로그인
 

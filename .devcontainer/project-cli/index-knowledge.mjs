@@ -21,6 +21,7 @@ async function indexNotes() {
     } else if (resolve(existing.pwd) !== path || existing.glob_pattern !== '*.md') {
       throw new Error(`Collection ${name} already points to a different path or file pattern`);
     }
+    if (filenames.length === 0) return;
     const updated = await store.update({ collections: [name] });
     if (updated.collections !== 1 || updated.skipped) throw new Error('Could not index every note');
     for (const filename of filenames) {

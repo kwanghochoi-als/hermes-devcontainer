@@ -10,13 +10,14 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.parse import quote
 
 from hermes_cli import kanban_db as kb
 from hermes_constants import get_hermes_home
 
-from .board import LANES, board
+from .board import BOARD, LANES, worker_boards
 
 
 def findings(items):
@@ -41,13 +42,14 @@ def collection_name(workspace):
     return f"learned-{label}-{suffix}"
 
 
-def write_note(directory, row, meta):
+def write_note(directory, row, meta, slug):
     card, run = row["task_id"], row["id"]
-    filename = f"{quote(card, safe='')}-r{run}.md"
+    prefix = "" if slug == BOARD else f"{slug}-"
+    filename = f"{prefix}{quote(card, safe='')}-r{run}.md"
     completed = datetime.fromtimestamp(row["ended_at"], timezone.utc).isoformat()
     lines = [f"# {Path(meta['workspace']).name} · {card}", "",
              f"- 프로젝트 · {meta['workspace']}", f"- 완료 · {completed}",
-             f"- 카드 · {card} / 실행 {run} / {LANES[row['profile']]}"]
+             f"- 보드 · {slug}", f"- 카드 · {card} / 실행 {run} / {LANES[row['profile']]}"]
     if meta.get("head"):
         lines.append(f"- Git HEAD · {meta['head']}")
     lines += ["", "## 확인한 사실", ""]
@@ -83,7 +85,16 @@ def index_collection(qmd_dir, name, filenames, stopping):
     return True
 
 
-def sync_pending(conn, qmd_dir, retry_after, stopping):
+def register_collection(workspace):
+    qmd_dir = get_hermes_home() / "qmd"
+    name = collection_name(workspace)
+    (qmd_dir / "knowledge" / name).mkdir(mode=0o700, parents=True, exist_ok=True)
+    # An empty manifest only registers the collection, including while Ollama is offline.
+    index_collection(qmd_dir, name, [], threading.Event())
+    return name
+
+
+def sync_pending(conn, slug, qmd_dir, retry_after, stopping):
     # The findings and outcome share the native completion transaction. A crash anywhere
     # before the acknowledgement leaves the run eligible, even across a container restart.
     rows = conn.execute("""
@@ -97,7 +108,7 @@ def sync_pending(conn, qmd_dir, retry_after, stopping):
     projects = defaultdict(list)
     for row in rows:
         meta = json.loads(row["metadata"])
-        projects[collection_name(meta["workspace"])].append((row, meta))
+        projects[collection_name(meta.get("knowledge_workspace") or meta["workspace"])].append((row, meta))
 
     for name in retry_after.keys() - projects.keys():
         del retry_after[name]
@@ -107,7 +118,7 @@ def sync_pending(conn, qmd_dir, retry_after, stopping):
         try:
             directory = qmd_dir / "knowledge" / name
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            notes = [(row, write_note(directory, row, meta)) for row, meta in runs]
+            notes = [(row, write_note(directory, row, meta, slug)) for row, meta in runs]
             if time.monotonic() < retry_after.get(name, 0):
                 continue
             if not index_collection(qmd_dir, name, [filename for _, filename in notes], stopping):
@@ -123,16 +134,21 @@ def sync_pending(conn, qmd_dir, retry_after, stopping):
 
 
 def watch(stopping):
-    retry_after = {}
     while not stopping.is_set():
         try:
-            with board() as conn:
-                previous_version = None
+            with worker_boards() as refresh:
+                versions = {}
+                retries = defaultdict(dict)
                 while not stopping.is_set():
-                    version = conn.execute("PRAGMA data_version").fetchone()[0]
-                    if version != previous_version or any(t <= time.monotonic() for t in retry_after.values()):
-                        sync_pending(conn, get_hermes_home() / "qmd", retry_after, stopping)
-                        previous_version = version
+                    connections = refresh()
+                    for slug in versions.keys() - connections.keys():
+                        del versions[slug], retries[slug]
+                    for slug, conn in connections.items():
+                        version = conn.execute("PRAGMA data_version").fetchone()[0]
+                        retry_after = retries[slug]
+                        if version != versions.get(slug) or any(t <= time.monotonic() for t in retry_after.values()):
+                            sync_pending(conn, slug, get_hermes_home() / "qmd", retry_after, stopping)
+                            versions[slug] = version
                     stopping.wait(2)
         except Exception as exc:
             print(f"QMD 완료 카드 읽기 재시도 대기 · {exc}", file=sys.stderr, flush=True)

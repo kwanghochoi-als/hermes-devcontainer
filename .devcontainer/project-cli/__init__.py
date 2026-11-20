@@ -6,7 +6,7 @@ from pathlib import Path
 from agent.runtime_cwd import resolve_agent_cwd, scoped_session_cwd
 from gateway.session_context import get_session_env
 
-from .board import BOARD, ENGINES, enqueue, project_dir
+from .board import BOARD, ENGINES, board_for_checkout, enqueue, knowledge_root, project_dir
 
 
 def session_directory(platform):
@@ -21,18 +21,18 @@ def slash(engine, prompt, session_id, platform):
     if not prompt.strip():
         return f"/{engine} <작업 지시>"
     try:
-        card = enqueue(engine, prompt, session_directory(platform), session_id)
+        slug, card = enqueue(engine, prompt, session_directory(platform), session_id)
     except (OSError, ValueError) as exc:
         return str(exc)
-    return f"{engine} 작업 {card} 접수 · hermes kanban --board {BOARD} show {card}"
+    return f"{engine} 작업 {card} 접수 · hermes kanban --board {slug} show {card}"
 
 
 def submit_tool(args, *, session_id=None, tool_call_id=None, **kwargs):
     try:
         cwd = session_directory(get_session_env("HERMES_SESSION_PLATFORM", ""))
-        card = enqueue(args["agent"], args["prompt"], cwd, session_id,
-                       key=f"{session_id}/{tool_call_id}" if session_id and tool_call_id else None)
-        return json.dumps({"board": BOARD, "task_id": card})
+        slug, card = enqueue(args["agent"], args["prompt"], cwd, session_id,
+                             key=f"{session_id}/{tool_call_id}" if session_id and tool_call_id else None)
+        return json.dumps({"board": slug, "task_id": card})
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
@@ -43,11 +43,13 @@ def setup_cli(parser):
     submit.add_argument("agent", choices=ENGINES)
     submit.add_argument("prompt")
     submit.add_argument("--session", help="Originating Hermes session ID for follow-up tasks")
-    commands.add_parser("knowledge", help="Print this checkout's QMD collection for completed worker findings")
+    commands.add_parser("board", help="Print the current project's Kanban board")
+    commands.add_parser("knowledge", help="Print the QMD collection for findings in the current project")
     commands.add_parser("serve", help="Run the Kanban CLI worker service")
     run = commands.add_parser("run-card", help="Internal supervised worker for one claimed checkout")
     run.add_argument("card_id")
     run.add_argument("lock_fd", type=int)
+    run.add_argument("--board", default=BOARD)
 
 
 def cli(args):
@@ -56,12 +58,15 @@ def cli(args):
         serve()
     elif args.action == "run-card":
         from .worker import process_card
-        process_card(args.card_id, args.lock_fd)
+        process_card(args.card_id, args.lock_fd, args.board)
     elif args.action == "knowledge":
         from .knowledge import collection_name
-        print(collection_name(project_dir(Path.cwd())))
+        print(collection_name(knowledge_root(project_dir(Path.cwd()))))
+    elif args.action == "board":
+        print(board_for_checkout(project_dir(Path.cwd())))
     else:
-        print(enqueue(args.agent, args.prompt, Path.cwd(), args.session))
+        _, card = enqueue(args.agent, args.prompt, Path.cwd(), args.session)
+        print(card)
 
 
 def register(ctx):

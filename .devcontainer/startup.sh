@@ -22,6 +22,9 @@ if ! command -v hermes >/dev/null; then
   fi
 fi
 
+log "프로젝트 생성기 연결"
+bash /workspaces/.devcontainer/setup-projects.sh
+
 log "Hermes 웹앱 활성화 및 빌드"
 hermes config set webapp.enabled true
 hermes webapp --build-only

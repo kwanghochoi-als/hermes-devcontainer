@@ -1,0 +1,66 @@
+--- a/hermes_cli/projects_db.py
++++ b/hermes_cli/projects_db.py
+@@ -217,6 +217,10 @@
+     return None
+ 
+ 
++from hermes_cli.workspace_projects.provision import workspace_creator
++
++
++@workspace_creator
+ def create_project(
+     conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
+     primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
+--- a/tools/project_tools.py
++++ b/tools/project_tools.py
+@@ -116,7 +116,8 @@
+             if existing is not None:
+                 # Idempotent create: the folder already belongs to a project. Reusing it beats minting
+                 # a duplicate — duplicated projects render N identical sidebar subtrees (#75820).
+-                proj = existing
++                from hermes_cli.workspace_projects.provision import provision_existing
++                proj = provision_existing(pdb, conn, existing)
+             else:
+                 pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None)
+                 proj = pdb.get_project(conn, pid)
+--- a/apps/desktop/src/app/chat/sidebar/project-dialog.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-dialog.tsx
+@@ -160,9 +160,8 @@
+       return
+     }
+ 
+-    // A project owns sessions by folder (cwd-prefix), so creation requires at
+-    // least one — a folder-less project couldn't hold a session anyway.
+-    if (mode === 'create' && trimmed && folders.length) {
++    // The workspace provisioner supplies the primary folder for a name-only create.
++    if (mode === 'create' && trimmed) {
+       // The arm is consumed exactly on SUCCESS (before the close): a failed
+       // create leaves the dialog open for a retry that still lands where it
+       // was dropped; the open-state effect discards it on cancel/teardown.
+@@ -207,7 +206,7 @@
+       <DialogContent className="max-w-md" onInteractOutside={event => event.preventDefault()}>
+         <DialogHeader>
+           <DialogTitle>{title}</DialogTitle>
+-          {mode === 'create' && <DialogDescription>{p.createDesc}</DialogDescription>}
++          {mode === 'create' && folders.length > 0 && <DialogDescription>{p.createDesc}</DialogDescription>}
+         </DialogHeader>
+ 
+         {mode !== 'add-folder' && (
+@@ -233,7 +232,7 @@
+           <div className="flex flex-col gap-1.5">
+             <span className="text-[0.6875rem] font-medium text-(--ui-text-tertiary)">{p.foldersLabel}</span>
+             {folders.length === 0 ? (
+-              <span className="text-[0.75rem] text-(--ui-text-quaternary)">{p.noFolders}</span>
++              <span className="text-[0.75rem] text-(--ui-text-quaternary)">{name.trim() ? `/workspaces/${name.trim()}` : p.noFolders}</span>
+             ) : (
+               <ul className="flex flex-col gap-1">
+                 {folders.map((folder, index) => (
+@@ -345,7 +344,7 @@
+               {t.common.cancel}
+             </Button>
+             <Button
+-              disabled={submitting || !name.trim() || (mode === 'create' && folders.length === 0)}
++              disabled={submitting || !name.trim()}
+               onClick={() => void submit()}
+               type="button"
+             >
