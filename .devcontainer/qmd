@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+# QMD appends /qmd to XDG_CACHE_HOME for its SQLite index and model cache.
+# Scope the XDG override to this process so other programs keep their caches.
+export XDG_CACHE_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export QMD_CONFIG_DIR="$XDG_CACHE_HOME/qmd"
+unset INDEX_PATH
+exec "$HOME/.local/share/hermes-qmd/bin/qmd" --index index "$@"

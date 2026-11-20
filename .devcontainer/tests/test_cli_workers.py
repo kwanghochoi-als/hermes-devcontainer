@@ -25,6 +25,9 @@ pathlib.Path('.probe-prompt').write_text(prompt)
 if 'WAIT_FOR_RESTART' in prompt and not pathlib.Path(os.environ['PROBE_GATE']).exists():
     time.sleep(120)
 report = {'status': 'completed', 'summary': session, 'tests': 'fixture'}
+fixture = pathlib.Path('.probe-result.json')
+if fixture.exists():
+    report.update(json.loads(fixture.read_text()))
 if codex:
     emit({'type':'item.completed','item':{'type':'agent_message','text':json.dumps(report)}})
     emit({'type':'turn.completed'})

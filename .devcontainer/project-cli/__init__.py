@@ -6,7 +6,7 @@ from pathlib import Path
 from agent.runtime_cwd import resolve_agent_cwd, scoped_session_cwd
 from gateway.session_context import get_session_env
 
-from .board import BOARD, ENGINES, enqueue
+from .board import BOARD, ENGINES, enqueue, project_dir
 
 
 def session_directory(platform):
@@ -43,6 +43,7 @@ def setup_cli(parser):
     submit.add_argument("agent", choices=ENGINES)
     submit.add_argument("prompt")
     submit.add_argument("--session", help="Originating Hermes session ID for follow-up tasks")
+    commands.add_parser("knowledge", help="Print this checkout's QMD collection for completed worker findings")
     commands.add_parser("serve", help="Run the Kanban CLI worker service")
     run = commands.add_parser("run-card", help="Internal supervised worker for one claimed checkout")
     run.add_argument("card_id")
@@ -56,6 +57,9 @@ def cli(args):
     elif args.action == "run-card":
         from .worker import process_card
         process_card(args.card_id, args.lock_fd)
+    elif args.action == "knowledge":
+        from .knowledge import collection_name
+        print(collection_name(project_dir(Path.cwd())))
     else:
         print(enqueue(args.agent, args.prompt, Path.cwd(), args.session))
 

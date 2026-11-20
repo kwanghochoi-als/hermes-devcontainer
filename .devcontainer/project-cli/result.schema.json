@@ -3,8 +3,21 @@
   "properties": {
     "status": { "type": "string", "enum": ["completed", "blocked"] },
     "summary": { "type": "string", "description": "Changes and evidence, or the specific blocker" },
-    "tests": { "type": "string", "description": "Commands actually run and their outcomes, or why none ran" }
+    "tests": { "type": "string", "description": "Commands actually run and their outcomes, or why none ran" },
+    "knowledge": {
+      "type": "array",
+      "description": "Reusable project facts directly confirmed during this task. Return [] if none.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fact": { "type": "string", "description": "A specific finding that will help on a future task" },
+          "evidence": { "type": "string", "description": "Inspected file and symbol/section, or test/command and observed outcome supporting this fact" }
+        },
+        "required": ["fact", "evidence"],
+        "additionalProperties": false
+      }
+    }
   },
-  "required": ["status", "summary", "tests"],
+  "required": ["status", "summary", "tests", "knowledge"],
   "additionalProperties": false
 }

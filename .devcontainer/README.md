@@ -34,24 +34,51 @@ hermes kanban --board cli-workers runs <카드-ID>
 
 Hermes의 Kanban 구독은 설정된 원래 채널·스레드로 결과를 전달합니다. 구독 여부는 Hermes의 `kanban.auto_subscribe_on_create` 설정을 따릅니다. 두 CLI는 설치된 사용자의 권한과 훅을 읽습니다. 현재 CLI에서 필요한 승인을 받을 수 없는 작업은 카드의 차단 사유와 원래 프로젝트에서 확인할 수 있습니다. 메신저에서 보류 중인 외부 CLI 명령을 직접 승인하려면 해당 CLI의 승인 훅과 메신저 연결이 별도로 필요합니다.
 
+## QMD 문서 검색
+
+Hermes의 `qmd` MCP 서버와 터미널의 `qmd`는 같은 색인을 사용합니다. 기본 컬렉션 `hermes-workspace`에는 이 운영 가이드가 들어갑니다. 문서와 검색어의 임베딩은 호스트 Ollama의 `qwen3-embedding:8b`가 생성합니다. 컨테이너에서 `http://host.docker.internal:11434/v1/embeddings`에 접근할 수 있어야 합니다.
+
+```bash
+hermes mcp test qmd
+qmd query 'vec: 중단된 카드의 작업을 다시 시작하는 방법' -c hermes-workspace --no-rerank
+```
+
+기존 Hermes 대화에는 `/reload-mcp`로 도구를 불러올 수 있습니다. Hermes에는 “hermes-workspace에서 워커 재개 방법을 찾아 근거 문서와 함께 알려줘”처럼 요청하면 됩니다. 오류 코드처럼 정확한 문자열은 `qmd search`로 찾습니다. 위의 `vec:`와 `--no-rerank` 조합은 호스트 임베딩만 사용하고, 일반 `qmd query`는 질의 확장·재정렬 모델을 추가로 내려받을 수 있습니다.
+
+프로젝트 루트에서 해당 저장소의 Markdown 문서를 추가합니다. `my-project-docs`는 프로젝트마다 고유한 이름으로 바꿉니다. 문서가 변경되면 마지막 두 명령을 다시 실행합니다.
+
+```bash
+qmd collection add "$PWD/docs" --name my-project-docs
+qmd update
+qmd embed
+```
+
+### 완료 카드에서 축적한 지식
+
+`/codex`와 `/claude` 워커는 작업 중 직접 확인한 프로젝트 사실과 근거 파일·테스트를 완료 보고에 담습니다. 근거가 있는 발견이 있으면 백그라운드 워커가 완료된 실행마다 Markdown 한 파일을 저장하고, 이 프로젝트의 QMD 컬렉션을 자동 등록·갱신합니다. 문서에는 카드 ID, 워커, 완료 시각, 확인 당시의 Git HEAD(있는 경우)가 함께 기록됩니다. 차단된 작업과 발견이 없는 작업은 건너뜁니다.
+
+새 Hermes 대화에서도 같은 프로젝트 폴더를 열고 “이전에 확인한 재시도 정책을 근거와 함께 찾아줘”처럼 요청할 수 있습니다. 터미널에서는 다음 명령으로 현재 checkout의 지식을 검색합니다. 컬렉션은 첫 발견을 저장할 때 생성되며, 다른 checkout이나 Git worktree는 별도 컬렉션을 사용합니다.
+
+```bash
+qmd query 'vec: 이전에 확인한 재시도 정책' -c "$(hermes project-cli knowledge)" --no-rerank
+```
+
+카드 완료와 색인은 독립적으로 처리됩니다. Ollama 연결이 끊기면 완료 보고와 Markdown이 남고, 워커가 30초 후 색인을 다시 시도합니다. 워커를 재시작해도 미처리 보고를 읽어 재개합니다. 성공하면 `hermes kanban --board cli-workers show <카드-ID> --json`의 `knowledge_indexed` 이벤트에 검색 가능한 문서 주소가 기록됩니다.
+
 ## 저장 위치
 
 | 데이터 | 위치 |
 |---|---|
 | 프로젝트 코드와 Git worktree | 호스트와 연결한 `/workspaces` |
 | Hermes 인증·설정·대화·Kanban DB | `hermes_home` 볼륨의 `/home/ubuntu/.hermes` |
+| QMD 설정·문서 색인·모델 캐시 | 같은 볼륨의 `qmd/index.yml`, `qmd/index.sqlite`, `qmd/models/` |
+| 완료 카드에서 확인한 프로젝트 지식 | 같은 볼륨의 `qmd/knowledge/<컬렉션>/<카드-ID>-r<실행-ID>.md` |
 | CLI 세션 연결 정보·실행별 로그 | 같은 볼륨의 `cli-workers/sessions` 및 `cli-workers/runs/<카드-ID>/<시도-ID>` |
 | Codex 및 Claude 원본 인증·대화 | `codex_home`, `claude_home` 볼륨 |
 
-## 설치와 최초 볼륨 전환
+## 초기 설치
 
-기존 컨테이너의 `~/.hermes`가 컨테이너 레이어에 있다면 **첫 재빌드 직전에** 다음 명령을 실행합니다. 기존 데이터와 SQLite 온라인 백업을 이 Compose 프로젝트의 새 볼륨에 복사합니다. 첫 재빌드 전에는 같은 컨테이너에서 다시 실행해 그동안의 변경을 반영할 수 있습니다. 볼륨 연결 후에는 복사를 건너뜁니다.
-
-```bash
-bash .devcontainer/seed-hermes-volume.sh
-```
-
-VS Code의 **Dev Containers: Rebuild Container**로 마운트를 적용합니다. 신규 설치에서는 재빌드 후 두 CLI와 Hermes의 모델을 인증합니다.
+VS Code에서 **Dev Containers: Rebuild Container**를 실행하면 Docker Compose가 영속 볼륨을 만들거나 기존 볼륨을 연결합니다. 초기 설치가 끝나면 아래 순서로 두 CLI와 Hermes를 인증합니다.
 
 ### 1. 코딩 에이전트 로그인
 

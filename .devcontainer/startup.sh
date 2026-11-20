@@ -37,6 +37,9 @@ if [ -f "$HOME/.hermes/.env" ]; then
   sed -i 's/^TERMINAL_TIMEOUT=.*/TERMINAL_TIMEOUT=600/' "$HOME/.hermes/.env"
 fi
 
+log "QMD와 호스트 Ollama 연결"
+bash /workspaces/.devcontainer/setup-qmd.sh
+
 log "Hermes Kanban CLI 워커 등록"
 bash /workspaces/.devcontainer/start-service.sh configure
 log "완료 — 남은 수동 단계는 .devcontainer/README.md 참고"

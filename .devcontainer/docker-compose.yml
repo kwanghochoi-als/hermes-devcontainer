@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: hermes-agent-cli
+    container_name: agent-cli
     restart: unless-stopped
     volumes:
       # 운영 저장소와 /workspaces/<프로젝트명>의 소스는 호스트 작업 폴더에 저장한다.

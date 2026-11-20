@@ -20,13 +20,18 @@ from hermes_constants import get_hermes_home
 from tools.environments.local import hermes_subprocess_env
 
 from .board import BOARD, LANES, board, project_dir
+from . import knowledge
 
 SCHEMA = Path(__file__).with_name("result.schema.json")
 REPORT = """Execute the user's Kanban task in this checkout. Include the tests actually run and
 their results in the final report. If work is incomplete or needs a person's approval, report
 blocked and explain what is needed. Respect the project's existing approval hooks for publishing,
 deployments, deletion, external messages, payments and access changes. Do not repeat an external
-action if a previous attempt may have performed it."""
+action if a previous attempt may have performed it.
+For knowledge, report reusable project facts you verified yourself, in the user's language.
+Cite repository-relative paths and symbols or reproducible checks and their observed results.
+Omit guesses, credentials, personal data and raw transcripts. Use an empty list when there
+is no such finding or the task is blocked. Hermes publishes these notes after completion."""
 CONCURRENCY = 4
 
 
@@ -202,6 +207,9 @@ def execute(conn, task, cwd, state, project_lock, stopping):
                           capture_output=True, text=True).stdout.strip()
     metadata = {"agent": engine, "cli_session_id": events.session, "workspace": str(cwd),
                 "head": head or None, "tests": report["tests"], "log": str(log)}
+    findings = knowledge.findings(report.get("knowledge"))
+    if findings:
+        metadata["knowledge"] = findings
     if not kb.complete_task(conn, task.id, result=summary, summary=summary, expected_run_id=run_id,
                             metadata=metadata):
         raise RuntimeError("Kanban 완료 조건 또는 실행 소유권을 확인하세요.")
@@ -255,6 +263,8 @@ def serve():
     with try_lock(state / "dispatcher.lock") as owner, board() as conn:
         if owner is None:
             raise SystemExit("project-cli 워커가 이미 실행 중입니다.")
+        indexer = threading.Thread(target=knowledge.watch, args=(stopping,), name="qmd-indexer", daemon=True)
+        indexer.start()
         active = {}
         projects = {}
         try:
@@ -289,8 +299,10 @@ def serve():
                                                                  start_new_session=True)
                 stopping.wait(1)
         finally:
+            stopping.set()
             for child in active.values():
                 if child.poll() is None:
                     child.terminate()
             for child in active.values():
                 child.wait()
+            indexer.join(timeout=5)
