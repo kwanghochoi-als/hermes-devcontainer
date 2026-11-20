@@ -1,0 +1,5 @@
+name: project-cli
+version: 1.0.0
+description: Run the project's Codex and Claude Code CLIs from a persistent Hermes Kanban board.
+provides_tools:
+  - project_cli_submit

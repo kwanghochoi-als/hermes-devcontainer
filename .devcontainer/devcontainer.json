@@ -1,0 +1,33 @@
+{
+  "name": "Hermes Agent Workspace",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "agent-cli",
+  "shutdownAction": "none",
+  "workspaceFolder": "/workspaces",
+  "features": {
+    "ghcr.io/devcontainers/features/node:2": {},
+    "ghcr.io/devcontainers/features/java:1": {
+        "version": "21"
+    },
+    "ghcr.io/devcontainers/features/python:1": {},
+    "ghcr.io/devcontainers/features/rust:1": {},
+    "ghcr.io/devcontainers/features/go:1": {},
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "moby": false
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "mhutchie.git-graph"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      }
+    }
+  },
+  // 컨테이너 생성 시 1회: Claude Code / Codex / Hermes 설치와 기본 설정
+  "postCreateCommand": "bash .devcontainer/startup.sh",
+  // 기존 컨테이너에서도 같은 서비스 실행 경로를 사용한다.
+  "postStartCommand": "bash .devcontainer/start-service.sh start"
+}

@@ -1,0 +1,30 @@
+services:
+  agent-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-agent-cli
+    restart: unless-stopped
+    volumes:
+      # 운영 저장소와 /workspaces/<프로젝트명>의 소스는 호스트 작업 폴더에 저장한다.
+      - ..:/workspaces:cached
+      # rebuild 후에도 에이전트 로그인·세션과 토큰 유지
+      - claude_home:/home/ubuntu/.claude
+      - codex_home:/home/ubuntu/.codex
+      - hermes_home:/home/ubuntu/.hermes
+    environment:
+      # ~/.claude.json 도 claude_home 볼륨 안에 저장되도록
+      CLAUDE_CONFIG_DIR: /home/ubuntu/.claude
+      HERMES_DASHBOARD_FILES_ROOT: /workspaces
+    command:
+      - -c
+      - |
+        exec bash /workspaces/.devcontainer/start-service.sh supervise
+    # 지식 검색이 호스트 Ollama에 임베딩을 요청할 때 사용하는 주소
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  claude_home:
+  codex_home:
+  hermes_home:

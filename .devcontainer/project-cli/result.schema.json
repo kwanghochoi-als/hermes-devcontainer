@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "enum": ["completed", "blocked"] },
+    "summary": { "type": "string", "description": "Changes and evidence, or the specific blocker" },
+    "tests": { "type": "string", "description": "Commands actually run and their outcomes, or why none ran" }
+  },
+  "required": ["status", "summary", "tests"],
+  "additionalProperties": false
+}
