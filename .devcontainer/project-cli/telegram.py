@@ -161,8 +161,9 @@ def setup():
     if not token:
         token = getpass.getpass("BotFather 봇 토큰 (입력 숨김) · ").strip()
     default = users[0] if len(users) == 1 and users[0].isdecimal() else ""
-    print("Telegram에서 이 봇의 개인 대화를 열고 시작(/start)을 누르세요.")
-    owner = input("승인할 Telegram 숫자 사용자 ID" + (" [현재 등록 계정]" if default else "") + " · ").strip() or default
+    print("BotFather로 만든 봇의 개인 대화에 /start를 보내세요. 이미 보냈다면 아래 ID 입력으로 진행하세요.")
+    print("본인의 숫자 ID는 별도 대화인 https://t.me/userinfobot 에서 /start를 보내 확인할 수 있습니다.")
+    owner = input("운영자 본인의 Telegram 숫자 사용자 ID" + (" [현재 등록 계정]" if default else "") + " · ").strip() or default
     if not re.fullmatch(r"[1-9][0-9]{0,15}", owner):
         raise SystemExit("개인 계정의 양의 정수 ID가 필요합니다.")
     try:

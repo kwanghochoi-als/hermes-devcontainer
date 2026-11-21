@@ -36,7 +36,9 @@ hermes kanban --board test-prj runs <카드-ID>
 
 ## Telegram에서 승인·답변·작업 보고 받기
 
-Telegram에서 **@BotFather**로 봇을 만들고, 만든 봇과의 개인 대화에서 **시작**을 누릅니다. 컨테이너 터미널에서 다음 명령을 실행하면 토큰을 숨김 입력으로 받고 수신할 운영자의 숫자 사용자 ID를 확인합니다. Hermes 대시보드의 **Messaging → Telegram → Create with QR**로 봇을 연결한 경우에는 등록된 토큰과 계정을 재사용할 수 있습니다. [Hermes Telegram 연결 안내](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram)
+Telegram에서 **@BotFather**로 봇을 만들고, 만든 봇과의 개인 대화에 `/start`를 한 번 보내 대화를 엽니다. 본인의 숫자 사용자 ID가 필요하면 별도로 **@userinfobot**에 `/start`를 보내 답장의 `Id`를 확인합니다. 컨테이너 터미널에서 아래 설정 명령을 실행하고 BotFather의 봇 토큰과 본인의 숫자 ID를 차례로 입력합니다. [사용자 ID 확인](https://t.me/userinfobot)
+
+Hermes 대시보드의 **Messaging → Telegram → Create with QR**로 봇을 연결한 경우에는 등록된 토큰과 계정을 재사용할 수 있습니다. [Hermes Telegram 연결 안내](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram)
 
 ```bash
 hermes project-cli telegram setup
