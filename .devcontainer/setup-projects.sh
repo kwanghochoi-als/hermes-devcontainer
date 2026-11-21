@@ -21,3 +21,11 @@ for source in hermes_cli/projects_db.py tools/project_tools.py apps/desktop/src/
   git -C "$checkout" apply --check --include="$source" "$patch"
   git -C "$checkout" apply --include="$source" "$patch"
 done
+
+for source in hermes_cli/kanban_db.py tools/clarify_tool.py; do
+  if git -C "$checkout" apply --check --reverse --include="$source" "$here/hermes-telegram.patch" 2>/dev/null; then
+    continue
+  fi
+  git -C "$checkout" apply --check --include="$source" "$here/hermes-telegram.patch"
+  git -C "$checkout" apply --include="$source" "$here/hermes-telegram.patch"
+done

@@ -29,6 +29,9 @@ their results in the final report. If work is incomplete or needs a person's app
 blocked and explain what is needed. Respect the project's existing approval hooks for publishing,
 deployments, deletion, external messages, payments and access changes. Do not repeat an external
 action if a previous attempt may have performed it.
+For human input, state the exact question or proposed action, target and effect in the summary.
+On resuming, read the Telegram operator's decision in this card's comments. Apply it to the
+described work and follow the CLI's own permission checks.
 For knowledge, report reusable project facts you verified yourself, in the user's language.
 Cite repository-relative paths and symbols or reproducible checks and their observed results.
 Omit guesses, credentials, personal data and raw transcripts. Use an empty list when there
@@ -154,7 +157,13 @@ def task_context(conn, task):
 
 def execute(conn, task, cwd, state, project_lock, stopping, slug):
     engine = LANES[task.assignee]
+    observer_root = Path('/workspaces/pharmmate')
+    observer = slug == 'pharmmate' or Path(cwd).resolve().is_relative_to(observer_root)
+    if observer and Path(cwd).resolve() != observer_root:
+        raise RuntimeError('Pharmmate observer requires the protected workspace root.')
     session_key = digest(str(cwd), task.session_id or task.id, engine)
+    if observer:
+        session_key = digest(session_key, task.current_run_id)
     events = Events(state / "sessions" / session_key)
     run_id = task.current_run_id
     runs = state / "runs" if slug == BOARD else state / "boards" / slug / "runs"
@@ -164,9 +173,12 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
     env = hermes_subprocess_env(inherit_credentials=True, base_env=dict(
         os.environ, HERMES_KANBAN_TASK=task.id, HERMES_KANBAN_BOARD=slug,
         HERMES_KANBAN_DB=str(kb.kanban_db_path(board=slug))))
+    env.pop("TELEGRAM_BOT_TOKEN", None)
     # Inherit the project lock into the CLI. A replacement worker cannot edit the
     # checkout while an earlier process is winding down.
-    cmd = ["setpriv", "--pdeathsig", "TERM", "--", *arguments(engine, events.session)]
+    cli = (['/usr/bin/python3', '-I', '-B', str(observer_root/'.observer/start.py'), engine, '--worker', str(SCHEMA)]
+           if observer else arguments(engine, events.session))
+    cmd = ["setpriv", "--pdeathsig", "TERM", "--", *cli]
     context = task_context(conn, task)
     with tempfile.TemporaryFile() as prompt, log.open("wb") as out, log.open("rb") as reader, \
             (files / "stderr.log").open("wb") as err:

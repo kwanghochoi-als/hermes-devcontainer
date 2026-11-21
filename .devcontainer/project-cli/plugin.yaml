@@ -3,3 +3,8 @@ version: 1.0.0
 description: Run the project's Codex and Claude Code CLIs from a persistent Hermes Kanban board.
 provides_tools:
   - project_cli_submit
+provides_hooks:
+  - pre_approval_request
+  - post_approval_response
+  - on_human_input_request
+  - on_session_end

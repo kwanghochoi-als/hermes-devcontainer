@@ -45,6 +45,8 @@ def setup_cli(parser):
     submit.add_argument("--session", help="Originating Hermes session ID for follow-up tasks")
     commands.add_parser("board", help="Print the current project's Kanban board")
     commands.add_parser("knowledge", help="Print the QMD collection for findings in the current project")
+    telegram = commands.add_parser("telegram", help="Connect or inspect the Telegram operator DM")
+    telegram.add_argument("operation", choices=("setup", "status"))
     commands.add_parser("serve", help="Run the Kanban CLI worker service")
     run = commands.add_parser("run-card", help="Internal supervised worker for one claimed checkout")
     run.add_argument("card_id")
@@ -53,7 +55,10 @@ def setup_cli(parser):
 
 
 def cli(args):
-    if args.action == "serve":
+    if args.action == "telegram":
+        from . import telegram
+        (telegram.setup if args.operation == "setup" else telegram.status)()
+    elif args.action == "serve":
         from .worker import serve
         serve()
     elif args.action == "run-card":
@@ -70,6 +75,13 @@ def cli(args):
 
 
 def register(ctx):
+    from . import telegram
+    ctx.register_approval_transport(telegram.TRANSPORT, telegram.present)
+    ctx.register_hook("pre_approval_request", telegram.approval_started)
+    ctx.register_hook("post_approval_response", telegram.approval_finished)
+    ctx.register_hook("on_human_input_request", telegram.local_notice)
+    ctx.register_hook("on_session_end", telegram.turn_finished)
+    ctx.register_telegram_handler(telegram.wire)
     for engine in ENGINES:
         def command(raw_args, *, session_id="", platform="", _engine=engine):
             return slash(_engine, raw_args, session_id, platform)

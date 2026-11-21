@@ -25,6 +25,9 @@ fi
 log "프로젝트 생성기 연결"
 bash /workspaces/.devcontainer/setup-projects.sh
 
+log "Hermes Telegram 어댑터 설치"
+hermes pm install --extra telegram
+
 log "Hermes 웹앱 활성화 및 빌드"
 hermes config set webapp.enabled true
 hermes webapp --build-only
