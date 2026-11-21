@@ -272,6 +272,7 @@ def exercise():
                 fd = os.open(state / "locks" / digest(str(project)), os.O_RDWR | os.O_CREAT, 0o600)
                 fcntl.flock(fd, fcntl.LOCK_EX)
                 process_card(card, fd, slug)
+                return json.loads((project / ".probe-args.json").read_text())
 
             with patch.dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}"):
                 # The connected gateway owns this independent notifier, including when both CLIs are busy.
@@ -280,22 +281,48 @@ def exercise():
                     binary = bins / engine
                     binary.write_text(fake_cli)
                     binary.chmod(0o755)
-                    slug, card = enqueue(engine, "Choose output", project, "same-project-session")
+                    slug, card = enqueue(engine, "Prepare the release", project, "same-project-session")
                     fixture = project / ".probe-result.json"
-                    fixture.write_text(json.dumps({"status": "blocked", "summary": "Use verified.md?"}))
-                    execute_card()
-                    tests.assertEqual(kb.get_task(conn, card).status, "blocked")
+                    proposal = "Deploy the prepared release to production?"
+                    fixture.write_text(json.dumps({"status": "blocked", "summary": proposal}))
+                    first_args = execute_card()
+                    task = kb.get_task(conn, card)
+                    tests.assertEqual((task.status, task.block_kind), ("blocked", "needs_input"))
                     ref = re.search(r"/workok (k[0-9a-f]+)", api.messages.get(timeout=12))[1]
                     if engine == "codex":
                         dispatch("ok", ref)
                     else:
-                        dispatch("reply", ref + " verified.md")
+                        dispatch("reply", ref + " Use staging only")
                     fixture.unlink()
-                    execute_card()
+                    resumed_args = execute_card()
+                    bypass = ("--dangerously-bypass-approvals-and-sandbox" if engine == "codex"
+                              else "--dangerously-skip-permissions")
+                    for args in (first_args, resumed_args):
+                        tests.assertEqual(args.count(bypass), 1)
+                        tests.assertNotIn("--sandbox", args)
+                        tests.assertNotIn("--permission-mode", args)
                     tests.assertEqual(kb.get_task(conn, card).status, "done")
                     sessions = [c.body.split()[2] for c in kb.list_comments(conn, card) if c.author == "project-cli"]
                     tests.assertEqual(len(sessions), 2)
                     tests.assertEqual(*sessions)
-                    tests.assertIn("Telegram 운영자", (project / ".probe-prompt").read_text())
+                    resumed_prompt = (project / ".probe-prompt").read_text()
+                    tests.assertIn("결정 대상 · " + proposal, resumed_prompt)
+                    if engine == "claude":
+                        tests.assertIn("Use staging only", resumed_prompt)
                     tests.assertIn("테스트 · fixture", api.messages.get(timeout=12))
+
+                slug, card = enqueue("claude", "Check the build", project)
+                for status, title in [("failed", "작업 실행 오류"), ("invalid-report", "반복 실행 오류")]:
+                    fixture.write_text(json.dumps({"status": status, "summary": "Dependency unavailable"}))
+                    execute_card()
+                    tests.assertEqual(kb.get_task(conn, card).block_kind, "capability")
+                    notice = api.messages.get(timeout=12)
+                    tests.assertIn(title, notice)
+                    tests.assertNotIn("/workok", notice)
+                    with tg.store(channel.path) as requests:
+                        tests.assertEqual(requests.execute("SELECT count(*) FROM requests WHERE board=? AND card=?",
+                                                           (slug, card)).fetchone()[0], 0)
+                    if status == "failed":
+                        tests.assertIn("Dependency unavailable", notice)
+                        kb.unblock_task(conn, card)
         api.shutdown()

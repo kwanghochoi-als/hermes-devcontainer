@@ -29,10 +29,22 @@ hermes kanban --board test-prj runs <카드-ID>
 
 ## 실행과 재개
 
-- 워커가 프로젝트의 Git checkout에서 `codex exec --json` 또는 `claude -p --verbose --output-format stream-json`을 실행합니다. 같은 checkout의 요청은 접수 순서대로 실행하고, 서로 다른 checkout은 최대 네 곳까지 병렬로 처리합니다. 독립된 변경은 별도 Git worktree에서 Hermes를 열어 맡길 수 있습니다.
+- 일반 프로젝트에서 워커는 `codex exec --dangerously-bypass-approvals-and-sandbox` 또는 `claude -p --dangerously-skip-permissions`로 실행합니다. 새 카드와 세션 재개에 같은 옵션을 적용합니다. Pharmmate 관찰 전용 보드는 대화형 승인 없이 원격 `main`의 고정된 커밋만 조회하는 전용 실행기를 사용합니다.
+- 같은 checkout의 요청은 접수 순서대로 실행하고, 서로 다른 checkout은 최대 네 곳까지 병렬로 처리합니다. 독립된 변경은 별도 Git worktree에서 Hermes를 열어 맡길 수 있습니다.
 - 같은 Hermes 세션·checkout·CLI의 후속 카드는 저장한 원본 CLI 세션 ID로 재개됩니다. 다른 CLI로 넘길 때는 같은 세션과 checkout에서 마지막으로 완료한 카드의 요약과 테스트 결과를 함께 전달합니다. 셸에서 같은 대화로 이어가려면 제출할 때 동일한 `--session <Hermes-세션-ID>`를 지정합니다.
 - 워커가 성공적으로 종료하고 완료 보고를 반환하면 카드에 결과, 보고된 테스트, 현재 HEAD, CLI 세션 ID와 로그 경로가 기록됩니다. 승인 필요, CLI 오류, 완료 보고 누락, 실행 도중 워커 중단은 `blocked`로 처리합니다. 실제 변경과 실행별 로그를 확인한 뒤 `hermes kanban --board test-prj unblock <카드-ID>`로 같은 작업을 다시 맡길 수 있습니다.
 - 게이트웨이와 CLI 워커는 독립 프로세스입니다. 터미널을 닫거나 게이트웨이를 재시작해도 워커는 계속 실행됩니다. 컨테이너가 멈추면 다음 기동에서 대기 카드를 이어 처리하고 중단된 시도의 기록을 보존합니다.
+
+## Pharmmate 백그라운드 Git 읽기 인증
+
+VS Code를 닫은 뒤에도 Hermes가 Pharmmate 리뷰를 시작하려면 devcontainer가 실행 중이어야 합니다. GitHub에서 fine-grained personal access token을 만들 때 소유자로 `alssolution`을 선택합니다. **Only select repositories**에서 `pharmmate`, `pharmmate-als`, `gitops-als`, `infra-als`, `jenkins-als`, `jenkins-lib`를 선택하고 **Contents** 권한을 **Read-only**로 지정합니다. 조직에서 승인을 요구하면 승인 후 등록합니다. [GitHub 토큰 생성](https://github.com/settings/personal-access-tokens/new?name=Hermes+Pharmmate&target_name=alssolution&contents=read) · [GitHub 권한 안내](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+
+```bash
+hermes project-cli git-auth setup
+hermes project-cli git-auth status
+```
+
+`setup`의 숨김 입력란에 토큰을 붙여 넣습니다. 여섯 원격의 `main`을 모두 확인하면 토큰을 영속 볼륨의 `~/.hermes/git-auth/pharmmate.token`에 권한 `0600`으로 저장합니다. 전용 Git 인증은 `~/.cache/pharmmate-observer/`의 미러에 적용되며, 실행 중인 게이트웨이와 워커도 다음 Git 호출부터 사용합니다. 토큰 갱신도 같은 `setup` 명령으로 진행합니다.
 
 ## Telegram에서 승인·답변·작업 보고 받기
 
@@ -51,10 +63,11 @@ hermes project-cli telegram status
 | --- | --- |
 | Hermes 명령 승인 | 실제 명령과 사유를 확인하고 승인 또는 거절 버튼을 누릅니다. `/workok <ID>`는 해당 명령을 한 번 승인하고 `/workno <ID>`는 거절합니다. 유효 시간은 메시지에 표시됩니다. |
 | 로컬 Hermes 세션의 질문 | `/workreply <ID> <답변>`으로 원래 세션에 답합니다. 선택지가 있으면 번호, 복수 선택이면 `1,3`처럼 답할 수 있습니다. |
-| Codex·Claude 카드 차단 | 프로젝트, 보드, 카드, 사유를 확인합니다. `/workok <ID>`는 해당 카드를 재개하고, `/workreply <ID> <답변>`은 답변을 카드에 기록한 뒤 재개합니다. `/workno <ID>`를 누르면 카드가 보류됩니다. |
+| Codex·Claude 의사결정 요청 | 프로젝트, 카드, 제안한 작업과 영향을 확인합니다. `/workok <ID>`는 그 제안을 승인하고, `/workreply <ID> <답변>`은 선택한 내용으로 카드를 재개합니다. `/workno <ID>`로 거절하면 카드가 보류됩니다. |
+| Codex·Claude 실행 오류 | CLI 실행 실패, 완료 보고 누락, 워커 중단은 원인과 함께 보고합니다. 원인을 해결한 뒤 해당 보드에서 카드를 재개할 수 있습니다. |
 | 완료·실행 중단·검토 요청 | 프로젝트 보드와 공용 `cli-workers` 보드의 새 보고를 자동으로 받습니다. 완료 보고에는 워커가 기록한 테스트 결과가 들어갑니다. 사람의 입력을 요청한 로컬 Hermes 턴도 종료 상태와 세션 ID를 보냅니다. |
 
-운영자가 봇과 나누는 개인 대화에서 응답하면 해당 요청에 한 번 반영됩니다. 워커가 다시 멈추면 새 요청 ID를 받습니다. 연결 시점부터 발생한 이벤트를 전달하며 게이트웨이 재시작 후에는 마지막 전송 위치부터 이어갑니다. Telegram 카드 승인은 워커가 보류한 작업을 재개합니다. CLI 자체 권한 확인과 `sudo` 비밀번호 입력은 원래 작업 화면에서 처리합니다.
+워커는 로컬 코드 수정, 빌드, 테스트와 복구 가능한 오류를 스스로 처리합니다. 요구사항만으로 결정할 수 없는 중요한 선택이나, 운영 배포·외부 게시·영구 삭제·결제·접근 권한 변경에 추가 승인이 필요할 때는 실행 전에 카드로 묻습니다. 운영자 답변은 해당 카드의 제안에 한 번 반영됩니다. 새로운 결정에는 새 요청 ID가 부여됩니다. 게이트웨이를 재시작하면 마지막 전송 위치부터 이어갑니다. Hermes의 `sudo` 비밀번호는 원래 작업 화면에서 입력합니다.
 
 ## QMD 문서 검색
 

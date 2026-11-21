@@ -13,6 +13,7 @@ import unittest
 FAKE_CLI = """#!/usr/bin/env python3
 import json, os, pathlib, sys, time, uuid
 args = sys.argv[1:]
+pathlib.Path('.probe-args.json').write_text(json.dumps(args))
 codex = pathlib.Path(sys.argv[0]).name == 'codex'
 resume = 'resume' if codex else '--resume'
 session = args[args.index(resume) + 1] if resume in args else str(uuid.uuid4())
@@ -97,6 +98,7 @@ class WorkerRecovery(unittest.TestCase):
                 worker.wait(timeout=10)
                 worker = serve()
                 wait_for(first, "blocked")
+                self.assertEqual(query("SELECT block_kind FROM tasks WHERE id=?", first), "transient")
                 wait_for(follow, "done")
                 self.assertEqual(query("SELECT count(*) FROM task_runs WHERE task_id=?", first), 1)
                 gate.touch()

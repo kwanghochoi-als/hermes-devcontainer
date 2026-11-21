@@ -1,7 +1,11 @@
 {
   "type": "object",
   "properties": {
-    "status": { "type": "string", "enum": ["completed", "blocked"] },
+    "status": {
+      "type": "string",
+      "enum": ["completed", "blocked", "failed"],
+      "description": "Use blocked when an operator must decide or authorize the next action. Use failed for a technical obstacle that persists after safe recovery."
+    },
     "summary": { "type": "string", "description": "Changes and evidence, or the specific blocker" },
     "tests": { "type": "string", "description": "Commands actually run and their outcomes, or why none ran" },
     "knowledge": {

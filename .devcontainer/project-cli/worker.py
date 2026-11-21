@@ -24,18 +24,23 @@ from .board import BOARD, LANES, board, knowledge_root, project_dir, worker_boar
 from . import knowledge
 
 SCHEMA = Path(__file__).with_name("result.schema.json")
-REPORT = """Execute the user's Kanban task in this checkout. Include the tests actually run and
-their results in the final report. If work is incomplete or needs a person's approval, report
-blocked and explain what is needed. Respect the project's existing approval hooks for publishing,
-deployments, deletion, external messages, payments and access changes. Do not repeat an external
-action if a previous attempt may have performed it.
-For human input, state the exact question or proposed action, target and effect in the summary.
-On resuming, read the Telegram operator's decision in this card's comments. Apply it to the
-described work and follow the CLI's own permission checks.
+REPORT = """Execute the user's Kanban task within the project's rules. Carry out routine,
+reversible work in scope, including inspection, local edits, builds, tests and troubleshooting,
+without asking for permission. Make ordinary implementation choices yourself.
+Before taking an action that needs an operator decision, stop and report blocked. Ask only
+for a material choice you cannot resolve from the task (such as a change of product scope),
+or for authorization missing for the specific action and target (such as a production deploy,
+external publication or message, irreversible data loss, new spending or access changes).
+State the question or proposed action, target and effect in the summary. Honor explicit
+authorization already given for this card. On resume, match the operator's answer in this
+card's comments to the original proposal and carry out only the scope they approved.
+Check prior attempts before repeating an action with external effects.
+Try safe recovery from technical errors. If a technical obstacle persists, report failed
+with the cause. Include the tests actually run and their results in the final report.
 For knowledge, report reusable project facts you verified yourself, in the user's language.
 Cite repository-relative paths and symbols or reproducible checks and their observed results.
 Omit guesses, credentials, personal data and raw transcripts. Use an empty list when there
-is no such finding or the task is blocked. Hermes publishes these notes after completion."""
+is no such finding or the task is incomplete. Hermes publishes these notes after completion."""
 CONCURRENCY = 4
 
 
@@ -57,11 +62,12 @@ def try_lock(path):
 
 def arguments(engine, session):
     if engine == "codex":
-        args = ["codex", "exec", "--sandbox", "workspace-write", "--output-schema", str(SCHEMA)]
+        args = ["codex", "exec"]
         if session:
             args += ["resume", session]
-        return args + ["--json", "-"]
-    args = ["claude", "-p", "--verbose", "--output-format", "stream-json",
+        return args + ["--dangerously-bypass-approvals-and-sandbox", "--output-schema", str(SCHEMA),
+                       "--json", "-"]
+    args = ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json",
             "--json-schema", SCHEMA.read_text()]
     return args + (["--resume", session] if session else [])
 
@@ -72,7 +78,7 @@ def decode_report(value):
             value = json.loads(value)
         except ValueError:
             return None
-    if (isinstance(value, dict) and value.get("status") in ("completed", "blocked")
+    if (isinstance(value, dict) and value.get("status") in ("completed", "blocked", "failed")
             and isinstance(value.get("summary"), str) and value["summary"].strip()
             and isinstance(value.get("tests"), str)):
         return value
@@ -201,7 +207,7 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
                     break
                 now = time.monotonic()
                 if stopping.is_set() or (task.max_runtime_seconds and now - started >= task.max_runtime_seconds):
-                    raise RuntimeError("실행 중단. 작업 폴더와 로그를 확인한 뒤 재개하세요.")
+                    raise InterruptedError("실행 중단. 작업 폴더와 로그를 확인한 뒤 재개하세요.")
                 if now >= next_heartbeat:
                     if not kb.heartbeat_claim(conn, task.id, claimer=task.claim_lock):
                         raise RuntimeError("Kanban 작업의 소유권이 변경됐습니다.")
@@ -215,8 +221,10 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
         raise RuntimeError(f"{engine} 종료 코드 {code}. {events.error or '완료 보고를 확인할 수 없습니다.'} 로그 {files}")
     report = events.report
     summary = f"{report['summary']}\n\n테스트 · {report['tests']}"
-    if report["status"] == "blocked":
-        raise RuntimeError(summary)
+    if report["status"] != "completed":
+        kind = "needs_input" if report["status"] == "blocked" else "capability"
+        kb.block_task(conn, task.id, reason=summary, kind=kind, expected_run_id=run_id)
+        return
     head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=cwd,
                           capture_output=True, text=True).stdout.strip()
     metadata = {"agent": engine, "cli_session_id": events.session, "workspace": str(cwd),
@@ -268,7 +276,7 @@ def process_card(card_id, lock_fd, slug):
             # Nobody holds its checkout lock, including the previous CLI. Its last
             # command might already have changed files; let the user reconcile it.
             kb.block_task(conn, card_id, reason="이전 워커가 중단되었습니다. 작업 폴더와 실행 로그를 확인하세요.",
-                          kind="needs_input", expected_run_id=task.current_run_id)
+                          kind="transient", expected_run_id=task.current_run_id)
             return
         task = kb.claim_task(conn, card_id, expect_assignee=task.assignee)
         if not task:
@@ -286,7 +294,8 @@ def process_card(card_id, lock_fd, slug):
                 task.workspace_path = str(workspace)
             execute(conn, task, workspace, state, lock, stopping, slug)
         except Exception as exc:
-            kb.block_task(conn, card_id, reason=str(exc), kind="needs_input", expected_run_id=task.current_run_id)
+            kind = "transient" if isinstance(exc, InterruptedError) else "capability"
+            kb.block_task(conn, card_id, reason=str(exc), kind=kind, expected_run_id=task.current_run_id)
 
 
 def serve():

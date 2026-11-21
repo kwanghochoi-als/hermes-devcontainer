@@ -8,7 +8,7 @@ import time
 from hermes_cli import kanban_db as kb
 
 from . import telegram as tg
-from .board import board, worker_boards
+from .board import LANES, board, worker_boards
 
 log = logging.getLogger(__name__)
 REPORTS = {"completed": "작업 완료", "blocked": "사람의 확인 필요", "review_requested": "검토 요청",
@@ -39,6 +39,10 @@ def decide(row, action, reply):
         message = {"ok": "제시된 내용으로 이 카드를 재개하도록 승인했습니다.",
                    "no": "이 요청을 거절했습니다. 카드를 보류합니다.",
                    "reply": f"다음 답변으로 이 카드를 재개합니다.\n{reply}"}[action]
+        proposal = conn.execute("SELECT json_extract(payload, '$.reason') FROM task_events WHERE task_id=? AND id=?",
+                                (card, event)).fetchone()[0]
+        if proposal:
+            message += f"\n결정 대상 · {tg.clean(proposal)}"
         kb.add_comment(conn, card, "Telegram 운영자", message)
         if action != "no":
             if state == "triage":
@@ -58,14 +62,18 @@ def publish(channel, slug, kanban, event):
         return
     detail = event.payload or {}
     project = Path(task.workspace_path).name if task.workspace_path else slug
-    header = f"{REPORTS[event.kind]} · {project} · {task.assignee or 'Hermes'}\n보드 {slug} · 카드 {task.id}"
+    needs_decision = event.kind in ("blocked", "block_loop_detected")
+    title = REPORTS[event.kind]
+    if needs_decision and task.assignee in LANES and detail.get("kind") in ("capability", "transient"):
+        needs_decision = False
+        title = "작업 실행 오류" if event.kind == "blocked" else "반복 실행 오류"
+    header = f"{title} · {project} · {task.assignee or 'Hermes'}\n보드 {slug} · 카드 {task.id}"
     reason = detail.get("reason") or detail.get("summary") or detail.get("error") or ""
     if event.kind == "completed":
         run = kanban.execute("SELECT summary FROM task_runs WHERE task_id=? AND id=?",
                              (task.id, event.run_id)).fetchone()
         reason = (run[0] if run else "") or reason or task.result
     reason = tg.clean(reason)
-    needs_decision = event.kind in ("blocked", "block_loop_detected")
     message = f"{tg.clean(header)}\n{tg.clean(task.title)[:180]}\n\n{reason if needs_decision else reason[:2800]}".strip()
     ref = None
     if needs_decision:

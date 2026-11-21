@@ -47,6 +47,8 @@ def setup_cli(parser):
     commands.add_parser("knowledge", help="Print the QMD collection for findings in the current project")
     telegram = commands.add_parser("telegram", help="Connect or inspect the Telegram operator DM")
     telegram.add_argument("operation", choices=("setup", "status"))
+    git_auth = commands.add_parser("git-auth", help="Configure or check GitHub read access for Pharmmate observers")
+    git_auth.add_argument("operation", choices=("setup", "status"))
     commands.add_parser("serve", help="Run the Kanban CLI worker service")
     run = commands.add_parser("run-card", help="Internal supervised worker for one claimed checkout")
     run.add_argument("card_id")
@@ -58,6 +60,9 @@ def cli(args):
     if args.action == "telegram":
         from . import telegram
         (telegram.setup if args.operation == "setup" else telegram.status)()
+    elif args.action == "git-auth":
+        from . import git_auth
+        (git_auth.setup if args.operation == "setup" else git_auth.status)()
     elif args.action == "serve":
         from .worker import serve
         serve()
