@@ -1,4 +1,6 @@
-/pharmmate/
-/pharmscope/
-/test-prj/
+# /workspaces 바로 아래의 프로젝트 폴더는 각자의 Git 저장소에서 관리한다.
+/*/
+!/.devcontainer/
+!/.github/
+
 __pycache__/

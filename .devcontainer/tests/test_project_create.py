@@ -21,6 +21,39 @@ from test_cli_workers import FAKE_CLI
 
 
 class ProjectCreation(unittest.TestCase):
+    def test_workspace_git_preserves_new_project_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+            def git(*args, cwd=root):
+                return subprocess.check_output(["git", *args], cwd=cwd, env=env, text=True).strip()
+
+            git("init", "-q")
+            (root / ".gitignore").write_bytes((Path(__file__).resolve().parents[2] / ".gitignore").read_bytes())
+            for name in (".devcontainer", ".github"):
+                (root / name).mkdir()
+                (root / name / "config").touch()
+            project = root / "new-project"
+            git("init", "-q", str(project))
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@localhost",
+                "commit", "-qm", "Initial commit", "--allow-empty", cwd=project)
+            head = git("rev-parse", "HEAD", cwd=project)
+            draft = root / "등록 전 프로젝트" / "draft.txt"
+            draft.parent.mkdir()
+            draft.write_text("in progress")
+            (project / "local.txt").write_text("local work")
+
+            git("add", "-A")
+            self.assertEqual(git("ls-files").splitlines(), [".devcontainer/config", ".github/config", ".gitignore"])
+            self.assertEqual(git("rev-parse", "--show-toplevel"), str(root.resolve()))
+            self.assertEqual(git("clean", "-nd"), "")
+            git("clean", "-fd")
+            self.assertEqual(git("rev-parse", "HEAD", cwd=project), head)
+            self.assertEqual((project / "local.txt").read_text(), "local work")
+            self.assertEqual(draft.read_text(), "in progress")
+
     def test_native_create_and_worker_boards(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
             root = Path(tmp)

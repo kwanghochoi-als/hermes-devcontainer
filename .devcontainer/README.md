@@ -113,6 +113,8 @@ Pharmmate 관찰이 완료되면 그 CLI 세션이 실제로 읽을 수 있었�
 
 ## 저장 위치
 
+운영 저장소는 최상위 폴더 중 `.devcontainer/`와 `.github/`를 추적합니다. `/workspaces/<프로젝트>`의 소스와 로컬 작업 파일은 각 프로젝트에서 커밋합니다. 운영 파일 정리 대상을 미리 확인하려면 `git clean -nd -- .devcontainer/ .github/`를 사용합니다.
+
 | 데이터 | 위치 |
 |---|---|
 | 프로젝트 코드와 Git worktree | 호스트와 연결한 `/workspaces` |
