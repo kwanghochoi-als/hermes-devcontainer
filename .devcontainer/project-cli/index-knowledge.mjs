@@ -4,23 +4,28 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const [qmdDir, name] = process.argv.slice(2);
+const [qmdDir, name, operation] = process.argv.slice(2);
 
 async function indexNotes() {
   const filenames = JSON.parse(readFileSync(0, 'utf8'));
   const configPath = join(qmdDir, 'index.yml');
   await access(configPath);
   const sdk = join(homedir(), '.local/share/hermes-qmd/lib/node_modules/@tobilu/qmd/dist/index.js');
-  const { createStore } = await import(pathToFileURL(sdk));
+  const { createStore, Maintenance } = await import(pathToFileURL(sdk));
   const store = await createStore({ dbPath: join(qmdDir, 'index.sqlite'), configPath });
   try {
     const path = join(qmdDir, 'knowledge', name);
     const existing = (await store.listCollections()).find(collection => collection.name === name);
-    if (!existing) {
-      await store.addCollection(name, { path, pattern: '*.md' });
-    } else if (resolve(existing.pwd) !== path || existing.glob_pattern !== '*.md') {
+    if (existing && (resolve(existing.pwd) !== path || existing.glob_pattern !== '*.md')) {
       throw new Error(`Collection ${name} already points to a different path or file pattern`);
     }
+    if (operation === '--remove') {
+      // Also finishes a previous removal interrupted between the YAML and SQLite writes.
+      await store.removeCollection(name);
+      new Maintenance(store.internal).cleanupOrphanedVectors();
+      return;
+    }
+    if (!existing) await store.addCollection(name, { path, pattern: '*.md' });
     const { loadConfig, updateCollectionSettings } = await import(new URL('./collections.js', pathToFileURL(sdk)));
     if (loadConfig().collections[name]?.includeByDefault !== false) {
       updateCollectionSettings(name, { includeByDefault: false });

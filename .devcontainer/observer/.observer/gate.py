@@ -15,6 +15,7 @@ REPOS = {**MANIFEST['pharmmate'], **{Path(path).name: url for path, url in MANIF
                                      if path.startswith('cicd/')}}
 CACHE = Path.home()/'.cache/pharmmate-observer'
 READER = '/usr/bin/python3 -I -B /workspaces/pharmmate/.observer/gate.py read'
+MCP_TOOL = 'mcp__pharmmate_snapshot__read_snapshot'
 SAFE = r'[A-Za-z0-9_.@/+\-]+'
 
 def git(*args):
@@ -36,14 +37,25 @@ def words(cmd):
     if path and any(p in ('','.','..') for p in path.split('/')): return None
     return token,op,name,path
 
-def allowed(event):
+def mcp_request(inp):
+    if not isinstance(inp, dict) or set(inp) not in ({'snapshot', 'repository'}, {'snapshot', 'repository', 'path'}):
+        return None
+    if not all(isinstance(value, str) for value in inp.values()) or inp['repository'] not in REPOS:
+        return None
+    if 'path' in inp:
+        return words(f"{READER} {inp['snapshot']} show {inp['repository']} {inp['path']}")
+    return words(f"{READER} {inp['snapshot']} list {inp['repository']}")
+
+def requested_read(event, *, mcp=False):
     inp = event.get('tool_input') or {}
-    if event.get('tool_name') not in ('Bash','exec_command'): return False
+    if mcp:
+        return mcp_request(inp) if event.get('tool_name') == MCP_TOOL else None
+    if event.get('tool_name') not in ('Bash','exec_command'): return None
     # Never permit shell selection, wrappers, environment overrides or extra commands.
-    if set(inp)-{'command','cmd','description','timeout','yield_time_ms','max_output_tokens','login','workdir'}: return False
-    if 'cmd' in inp and 'command' in inp: return False
-    if inp.get('workdir',str(ROOT)) != str(ROOT): return False
-    return bool(words(inp.get('command',inp.get('cmd',''))))
+    if set(inp)-{'command','cmd','description','timeout','yield_time_ms','max_output_tokens','login','workdir'}: return None
+    if 'cmd' in inp and 'command' in inp: return None
+    if inp.get('workdir',str(ROOT)) != str(ROOT): return None
+    return words(inp.get('command',inp.get('cmd','')))
 
 def key(e):
     sid = e['session_id']; assert isinstance(sid,str) and sid
@@ -72,20 +84,22 @@ def hook(e):
     import fcntl
     event = e['hook_event_name']; state = key(e)
     challenge = os.environ.get('PHARMMATE_OBSERVER_PROBE','')
-    if re.fullmatch('tool-[0-9a-f]{32}',challenge):
-        if event == 'UserPromptSubmit':
-            print('{}'); return
-        if event != 'PreToolUse': raise ValueError('invalid probe event')
-        probe_seen(challenge, event)
-        deny_tool('OBSERVER_HOOK_BLOCK_' + challenge)
-        return
+    tool_probe = bool(re.fullmatch('tool-[0-9a-f]{32}', challenge))
+    mcp = os.environ.get('PHARMMATE_OBSERVER_READER') == 'mcp'
+    if tool_probe:
+        # Only this challenge and this CLI session can attest to the test call.
+        state = Path(os.environ['PHARMMATE_OBSERVER_PROBE_DIR']) / f'{challenge}-{state.name}'
+        if event == 'PreToolUse':
+            if state.is_file() and requested_read(e, mcp=mcp) == (state.read_text(), 'list', 'pharmmate', None):
+                probe_seen(challenge, event)
+            deny_tool('Pharmmate observer self-test: the tool call was blocked.')
+            return
     if event == 'PreToolUse':
         if worker_output(e) and re.fullmatch('[0-9a-f]{32}',state.read_text()):
             print(json.dumps({'hookSpecificOutput':{'hookEventName':event,'permissionDecision':'allow',
                                                     'permissionDecisionReason':'Format the verified worker report'}}))
             return
-        if not allowed(e): raise ValueError('read-only')
-        inp = e['tool_input']; parsed = words(inp.get('command',inp.get('cmd','')))
+        parsed = requested_read(e, mcp=mcp)
         if parsed is None: raise ValueError('unknown request')
         token = parsed[0]
         if token != state.read_text(): raise ValueError('no current snapshot')
@@ -95,22 +109,35 @@ def hook(e):
         probe_seen(challenge, event)
         print('OBSERVER_HOOK_BLOCK_'+challenge,file=sys.stderr); sys.exit(2)
     CACHE.mkdir(mode=0o700,parents=True,exist_ok=True)
+    receipt = None if tool_probe else os.environ.get('PHARMMATE_OBSERVER_RECEIPT')
     with (CACHE/'lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         state.unlink(missing_ok=True)
+        if receipt:
+            Path(receipt).write_text('')
         with ThreadPoolExecutor(max_workers=len(REPOS)) as pool:
             ids=dict(zip(REPOS,pool.map(lambda n:refresh(REPOS[n],CACHE/(n+'.git')),REPOS)))
         token=secrets.token_hex(16); (CACHE/token).write_text(json.dumps(ids)); state.write_text(token)
-        if receipt := os.environ.get('PHARMMATE_OBSERVER_RECEIPT'):
-            target = Path(receipt)
-            target.write_text(json.dumps({'session_id': e['session_id'], 'repositories': ids}))
-    message=f'PHARMMATE_OBSERVER_OK {token}. Read only, via exact commands: {READER} {token} list REPO or {READER} {token} show REPO PATH. Repositories: '+', '.join(ids)
+        if receipt:
+            Path(receipt).write_text(json.dumps({'session_id': e['session_id'], 'repositories': ids}))
+    if mcp:
+        sample = f'{MCP_TOOL} with ' + json.dumps({'snapshot': token, 'repository': 'pharmmate'})
+        usage = f'Use only the read_snapshot MCP tool from pharmmate_snapshot. Example: {sample}. Supply path to read a file.'
+    else:
+        sample = f'{READER} {token} list pharmmate'
+        usage = f'Use exact shell commands: {READER} {token} list REPO or {READER} {token} show REPO PATH.'
+    message = f'PHARMMATE_OBSERVER_OK {token}. Read only. {usage} Repositories: ' + ', '.join(ids)
+    if tool_probe:
+        message += f'\nThis is the tool hook self-test. Request this exact read once: {sample}'
     print(json.dumps({'hookSpecificOutput':{'hookEventName':event,'additionalContext':message}}))
 
-def reader(args):
-    parsed=words(READER+' '+' '.join(args))
-    if not parsed: raise ValueError('invalid request')
-    token,op,name,path=parsed; rev=json.loads((CACHE/token).read_text())[name]; assert re.fullmatch('[0-9a-f]{40,64}',rev)
+def read_snapshot(parsed, *, expected_commits=None):
+    token,op,name,path=parsed
+    commits = json.loads((CACHE/token).read_text())
+    if expected_commits is not None and commits != expected_commits:
+        raise ValueError('snapshot does not match the run receipt')
+    rev = commits[name]
+    if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', rev): raise ValueError('invalid revision')
     repo=CACHE/(name+'.git')
     if op=='list': data=git('--git-dir',repo,'ls-tree','-r','--name-only',rev)
     else:
@@ -118,7 +145,12 @@ def reader(args):
         obj=rev+':'+path
         if int(git('--git-dir',repo,'cat-file','-s',obj))>2_000_000: raise ValueError('file too large')
         data=git('--git-dir',repo,'cat-file','blob',obj)
-    sys.stdout.buffer.write(data)
+    return data
+
+def reader(args):
+    parsed = words(READER+' '+' '.join(args))
+    if not parsed: raise ValueError('invalid request')
+    sys.stdout.buffer.write(read_snapshot(parsed))
 
 if __name__=='__main__':
     os.umask(0o077)

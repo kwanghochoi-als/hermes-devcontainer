@@ -11,10 +11,14 @@ BASE = Path(__file__).resolve().parents[1]
 PROJECTS = json.loads((BASE / "projects.json").read_text())
 OBSERVER = BASE / "observer"
 POLICY_FILES = ("AGENTS.md", "CLAUDE.md", ".claude/settings.json", ".codex/config.toml",
-                ".codex/hooks.json", ".observer/start.py", ".observer/gate.py", ".observer/sources.json")
+                ".codex/hooks.json", ".observer/start.py", ".observer/gate.py", ".observer/snapshot_mcp.py",
+                ".observer/sources.json")
 PREVIOUS = {
-    ".observer/start.py": "ca43ba226b8a4dc876612952341f98c6ab9bee93d4af98ddf74656a01f2f08a8",
-    ".observer/gate.py": "13783d7f4ae916cf77ab39783c1c48c878cbd3d067d0775df2976a0a95e239ac",
+    "AGENTS.md": {"8b5387e48af5b18a1523e4237b394a76ad01899b952707499d2f5b9049945f04"},
+    ".observer/start.py": {"ca43ba226b8a4dc876612952341f98c6ab9bee93d4af98ddf74656a01f2f08a8",
+                           "96c405306af7ffdf8e54af3d45bb5b72f1dba26e9a9dd7e7b485b73a3d2f2ac8"},
+    ".observer/gate.py": {"13783d7f4ae916cf77ab39783c1c48c878cbd3d067d0775df2976a0a95e239ac",
+                          "b4a07e25675d73f9a6f846b95eb402ccb8a864f572c8fcff044610f54e31c3fc"},
 }
 
 
@@ -29,7 +33,7 @@ def install_observer(root):
             continue
         if target.exists() or target.is_symlink():
             data = target.read_bytes() if target.is_file() and not target.is_symlink() else None
-            if data is None or (data != source.read_bytes() and hashlib.sha256(data).hexdigest() != PREVIOUS.get(name)):
+            if data is None or (data != source.read_bytes() and hashlib.sha256(data).hexdigest() not in PREVIOUS.get(name, ())):
                 raise ValueError(f"로컬 관찰 정책 변경을 먼저 확인하세요 · {target}")
         with tempfile.TemporaryDirectory(dir=target.parent) as tmp:
             link = Path(tmp) / "policy"

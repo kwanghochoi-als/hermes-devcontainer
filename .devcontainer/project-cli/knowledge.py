@@ -1,7 +1,9 @@
 """Publish worker-reported project findings from committed Kanban runs to QMD."""
 
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -108,9 +110,22 @@ def read_revisions(path, session):
     return commits
 
 
-def index_collection(qmd_dir, name, filenames, stopping):
+@contextmanager
+def collection_lock(qmd_dir, name):
+    locks = qmd_dir / ".locks"
+    if locks.resolve() != qmd_dir.resolve() / ".locks":
+        raise ValueError(f"QMD 잠금 경로를 확인하세요 · {locks}")
+    locks.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (locks / name).open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield locks / (name + ".cutoff")
+
+
+def index_collection(qmd_dir, name, filenames, stopping, *, remove=False):
     script = Path(__file__).with_name("index-knowledge.mjs")
     command = ["setpriv", "--pdeathsig", "TERM", "--", "node", str(script), str(qmd_dir), name]
+    if remove:
+        command.append("--remove")
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as manifest:
         json.dump(filenames, manifest)
         manifest.seek(0)
@@ -132,9 +147,10 @@ def index_collection(qmd_dir, name, filenames, stopping):
 def register_collection(workspace):
     qmd_dir = get_hermes_home() / "qmd"
     name = collection_name(workspace)
-    (qmd_dir / "knowledge" / name).mkdir(mode=0o700, parents=True, exist_ok=True)
-    # An empty manifest only registers the collection, including while Ollama is offline.
-    index_collection(qmd_dir, name, [], threading.Event())
+    with collection_lock(qmd_dir, name):
+        (qmd_dir / "knowledge" / name).mkdir(mode=0o700, parents=True, exist_ok=True)
+        # An empty manifest registers even while Ollama is offline.
+        index_collection(qmd_dir, name, [], threading.Event())
     return name
 
 
@@ -161,13 +177,23 @@ def sync_pending(conn, slug, qmd_dir, retry_after, stopping):
         if stopping.is_set():
             return
         try:
-            directory = qmd_dir / "knowledge" / name
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            notes = [(row, write_note(directory, row, meta, slug)) for row, meta in runs]
-            if time.monotonic() < retry_after.get(name, 0):
-                continue
-            if not index_collection(qmd_dir, name, [filename for _, filename in notes], stopping):
-                return
+            with collection_lock(qmd_dir, name) as cutoff:
+                # A watcher can hold rows read before a concurrent project deletion.
+                if slug == BOARD and cutoff.exists():
+                    last_removed = int(cutoff.read_text())
+                    runs = [(row, meta) for row, meta in runs if row["id"] > last_removed]
+                elif slug != BOARD and (not kb.board_exists(slug) or kb.read_board_metadata(slug)["archived"]):
+                    continue
+                if not runs:
+                    retry_after.pop(name, None)
+                    continue
+                directory = qmd_dir / "knowledge" / name
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                notes = [(row, write_note(directory, row, meta, slug)) for row, meta in runs]
+                if time.monotonic() < retry_after.get(name, 0):
+                    continue
+                if not index_collection(qmd_dir, name, [filename for _, filename in notes], stopping):
+                    return
             with kb.write_txn(conn):
                 for row, filename in notes:
                     kb._append_event(conn, row["task_id"], "knowledge_indexed",

@@ -28,7 +28,12 @@ def worker_boards():
         for slug in opened.keys() - names:
             opened.pop(slug).close()
         for slug in sorted(names - opened.keys()):
-            opened[slug] = connect(board=slug)
+            try:
+                opened[slug] = connect(board=slug)
+            except ValueError:
+                # A project can be deleted between listing and opening its board.
+                if slug == BOARD or (kb.board_exists(slug) and not kb.read_board_metadata(slug).get("archived")):
+                    raise
         return opened
 
     try:

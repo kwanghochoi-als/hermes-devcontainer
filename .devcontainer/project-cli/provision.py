@@ -104,15 +104,20 @@ def starter_session(conn, sessions, project, path, title, collection, sid):
             f"완료 카드에서 확인한 지식은 QMD의 `{collection}` 컬렉션에서 검색할 수 있습니다.",
             message_uid=f"project-welcome-{project.id}")
     key = f"project-cli.session.{project.id}"
-    if pdb._get_meta(conn, key) != sid:
+    owner_key = f"project-cli.knowledge.{project.id}.{collection}"
+    if pdb._get_meta(conn, key) != sid or pdb._get_meta(conn, owner_key) != str(path):
         with pdb.write_txn(conn):
             pdb._upsert_meta_locked(conn, key, sid)
+            pdb._upsert_meta_locked(conn, owner_key, str(path))
+            conn.executemany("DELETE FROM project_meta WHERE key=?",
+                             [("project-cli.hidden-root." + folder.path,) for folder in project.folders])
 
 
 def workspace_creator(native_create):
     @wraps(native_create)
     def create(conn, *, name, folders=None, primary_path=None, **options):
         from hermes_cli import projects_db as pdb
+        from .removal import default_board_for_new_project
 
         name = str(name or "").strip()
         if not name:
@@ -148,13 +153,15 @@ def workspace_creator(native_create):
             if explicit_board in shared:
                 raise ValueError(f"프로젝트 전용 보드를 지정하세요 · {explicit_board}")
             binding = old.board_slug if old and old.board_slug not in shared else None
-            board_name = explicit_board or binding or (f"project-{slug}" if slug in shared else slug)
+            board_name = explicit_board or binding or default_board_for_new_project(
+                conn, f"project-{slug}" if slug in shared else slug)
             meta = kb.read_board_metadata(board_name)
             owner = meta.get("project_id")
             other_binding = binding and explicit_board and binding != explicit_board
             other_owner = owner and (not old or owner != old.id)
             existing_board = not owner and kb.board_exists(board_name) and not (explicit_board or binding)
-            if other_binding or meta["archived"] or other_owner or existing_board:
+            retired = pdb._get_meta(conn, f"project-cli.retired-board.{board_name}")
+            if other_binding or meta["archived"] or other_owner or existing_board or retired:
                 raise ValueError(f"이미 사용 중인 Kanban 보드입니다 · {board_name}")
             existing_sid = existing_session(conn, sessions, old, path, title)
             git_repo(path, root)
