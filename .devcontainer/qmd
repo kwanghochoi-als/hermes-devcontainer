@@ -1,9 +1,31 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 # QMD appends /qmd to XDG_CACHE_HOME for its SQLite index and model cache.
 # Scope the XDG override to this process so other programs keep their caches.
 export XDG_CACHE_HOME="${HERMES_HOME:-$HOME/.hermes}"
 export QMD_CONFIG_DIR="$XDG_CACHE_HOME/qmd"
 unset INDEX_PATH
+case "${1:-}" in
+  query|search|vsearch)
+    args=()
+    scope=()
+    explicit=false
+    for arg in "$@"; do
+      case "$arg" in
+        --all-projects) scope=(--all-projects);;
+        -c|--collection|--collection=*|-c?*) explicit=true; args+=("$arg");;
+        *) args+=("$arg");;
+      esac
+    done
+    if ! "$explicit"; then
+      names=$(hermes project-cli search-scope "${scope[@]}")
+      while IFS= read -r name; do args+=(-c "$name"); done <<<"$names"
+    elif (( ${#scope[@]} )); then
+      echo '컬렉션 선택과 --all-projects 중 하나를 지정하세요.' >&2
+      exit 2
+    fi
+    set -- "${args[@]}"
+    ;;
+esac
 exec "$HOME/.local/share/hermes-qmd/bin/qmd" --index index "$@"

@@ -12,6 +12,8 @@ import threading
 import time
 import unittest
 
+import fixture_transport
+
 from test_cli_workers import FAKE_CLI
 
 
@@ -57,7 +59,7 @@ class KnowledgeRecovery(unittest.TestCase):
             root = Path(tmp)
             home = root / 'hermes'
             (home / 'plugins').mkdir(parents=True)
-            (home / 'plugins/project-cli').symlink_to(Path(__file__).resolve().parents[1] / 'project-cli')
+            fixture_transport.install(home)
             (home / 'config.yaml').write_text('plugins:\n  enabled: [project-cli]\n')
             qmd = home / 'qmd'
             qmd.mkdir()

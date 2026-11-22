@@ -1,2 +1,4 @@
-pharmmate
-pharmscope
+/pharmmate/
+/pharmscope/
+/test-prj/
+__pycache__/

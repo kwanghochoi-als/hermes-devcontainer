@@ -16,6 +16,10 @@ services:
       # ~/.claude.json 도 claude_home 볼륨 안에 저장되도록
       CLAUDE_CONFIG_DIR: /home/ubuntu/.claude
       HERMES_DASHBOARD_FILES_ROOT: /workspaces
+      HERMES_CLI_CONTROLLER: agent-cli
+      HERMES_CLI_CONCURRENCY: ${HERMES_CLI_CONCURRENCY:-4}
+      HERMES_CLI_PROJECT_CONCURRENCY: ${HERMES_CLI_PROJECT_CONCURRENCY:-2}
+      HERMES_CLI_MAX_RUNTIME_SECONDS: ${HERMES_CLI_MAX_RUNTIME_SECONDS:-86400}
     command:
       - -c
       - |

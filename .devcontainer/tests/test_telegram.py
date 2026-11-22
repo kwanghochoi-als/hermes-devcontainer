@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -220,8 +221,25 @@ def exercise():
         with board(BOARD) as conn:
             reports.drain(channel, BOARD, conn)
             tests.assertTrue(api.messages.empty())
+            tests.assertIn(f"/workrequest {BOARD} {old_id}", dispatch("status", BOARD))
+            tests.assertIn(old_id, dispatch("request", f"{BOARD} {old_id}"))
+            recovered = re.search(r"/workok (k[0-9a-f]+)", api.messages.get(timeout=5))[1]
+            tests.assertIn("보류", dispatch("no", recovered))
+            tests.assertEqual(dispatch("request", f"{BOARD} {old_id}"), tg.STALE)
+            tests.assertNotIn(f"/workrequest {BOARD} {old_id}", dispatch("status", BOARD))
             slug, card = enqueue("claude", "Confirm the output file", project, "operator-session")
             before = kb.claim_task(conn, card, expect_assignee="cli:claude")
+            from hermes_cli.kanban_db_dispatch import heartbeat_worker
+            heartbeat_worker(conn, card, expected_run_id=before.current_run_id)
+            tests.assertIn("첫 출력 대기", dispatch("status", BOARD))
+            output = home / "cli-workers/runs" / card / str(before.current_run_id) / "events.jsonl"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("{}\n")
+            old = time.time() - 125
+            os.utime(output, (old, old))
+            summary = dispatch("status", BOARD)
+            tests.assertIn("마지막 출력 2분 전", summary)
+            tests.assertIn("워커 응답", summary)
             kb.block_task(conn, card, kind="needs_input", reason="Which file?", expected_run_id=before.current_run_id)
             api.refuse = True
             with tests.assertRaises(Exception):
@@ -274,7 +292,11 @@ def exercise():
                 process_card(card, fd, slug)
                 return json.loads((project / ".probe-args.json").read_text())
 
-            with patch.dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}"):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("fixture_transport", Path(__file__).with_name("fixture_transport.py"))
+            fixture_transport = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fixture_transport)
+            with patch("hermes_cli.workspace_projects.worker.isolation", fixture_transport), patch.dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}"):
                 # The connected gateway owns this independent notifier, including when both CLIs are busy.
                 wire(Application.builder().bot(tg.bot_client(channel.token)).updater(None).build(), Mock())
                 for engine in ("codex", "claude"):

@@ -20,6 +20,7 @@ configure() {
   hermes plugins enable project-cli --no-allow-tool-override
   hermes project-cli --help >/dev/null
   /usr/bin/python3 -I -B "$plugin_dir/git_auth.py" install
+  /usr/bin/python3 -I -B "$plugin_dir/layout.py"
   hermes kanban boards create cli-workers --name "Project CLI workers" >/dev/null
   touch "$runtime/configured"
 }

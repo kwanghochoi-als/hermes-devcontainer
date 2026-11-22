@@ -9,7 +9,6 @@ import tempfile
 import time
 import unittest
 
-
 FAKE_CLI = """#!/usr/bin/env python3
 import json, os, pathlib, sys, time, uuid
 args = sys.argv[1:]
@@ -23,8 +22,8 @@ emit({'type': 'thread.started', 'thread_id': session} if codex else
      {'type': 'system', 'subtype': 'init', 'session_id': session})
 prompt = sys.stdin.read()
 pathlib.Path('.probe-prompt').write_text(prompt)
-if 'WAIT_FOR_RESTART' in prompt and not pathlib.Path(os.environ['PROBE_GATE']).exists():
-    time.sleep(120)
+while 'WAIT_FOR_RESTART' in prompt and not pathlib.Path(os.environ['PROBE_GATE']).exists():
+    time.sleep(0.2)
 report = {'status': 'completed', 'summary': session, 'tests': 'fixture'}
 fixture = pathlib.Path('.probe-result.json')
 if fixture.exists():
@@ -39,12 +38,12 @@ else:
 
 class WorkerRecovery(unittest.TestCase):
     def test_restart_preserves_queue_and_native_session(self):
+        import fixture_transport
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            plugin = Path(__file__).resolve().parents[1] / "project-cli"
             state = root / "hermes"
             (state / "plugins").mkdir(parents=True)
-            (state / "plugins/project-cli").symlink_to(plugin)
+            fixture_transport.install(state)
             (state / "config.yaml").write_text("plugins:\n  enabled: [project-cli]\n")
             bins = root / "bin"
             bins.mkdir()

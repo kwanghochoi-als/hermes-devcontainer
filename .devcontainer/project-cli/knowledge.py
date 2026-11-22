@@ -17,7 +17,7 @@ from urllib.parse import quote
 from hermes_cli import kanban_db as kb
 from hermes_constants import get_hermes_home
 
-from .board import BOARD, LANES, worker_boards
+from .board import BOARD, LANES, knowledge_root, project_dir, worker_boards
 
 
 def findings(items):
@@ -42,6 +42,35 @@ def collection_name(workspace):
     return f"learned-{label}-{suffix}"
 
 
+def search_scope(cwd=None, *, all_projects=False):
+    if all_projects:
+        import hermes_yaml as yaml
+        config = yaml.safe_load((get_hermes_home() / "qmd/index.yml").read_text())
+        return sorted(config.get("collections", {})) or ["hermes-workspace"]
+    root = Path(os.environ.get("HERMES_DASHBOARD_FILES_ROOT", "/workspaces")).resolve()
+    if not cwd or Path(cwd).resolve() == root or not Path(cwd).resolve().is_relative_to(root):
+        return ["hermes-workspace"]
+    return [collection_name(knowledge_root(project_dir(cwd)))]
+
+
+def scope_query(tool_name="", args=None, session_id="", **kwargs):
+    if tool_name != "mcp__qmd__query":
+        return
+    selected = (args or {}).get("collections")
+    if selected and selected != ["*"]:
+        return
+    from agent.runtime_cwd import scoped_session_cwd
+    cwd = scoped_session_cwd()
+    if not cwd and session_id:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            cwd = (db.get_session(session_id) or {}).get("cwd")
+        finally:
+            db.close()
+    return {"action": "modify", "args": {"collections": search_scope(cwd, all_projects=selected == ["*"])}}
+
+
 def write_note(directory, row, meta, slug):
     card, run = row["task_id"], row["id"]
     prefix = "" if slug == BOARD else f"{slug}-"
@@ -52,8 +81,11 @@ def write_note(directory, row, meta, slug):
              f"- 보드 · {slug}", f"- 카드 · {card} / 실행 {run} / {LANES[row['profile']]}"]
     if meta.get("head"):
         lines.append(f"- Git HEAD · {meta['head']}")
-    lines += ["", "## 확인한 사실", ""]
-    for item in meta["knowledge"]:
+    for repo, sha in sorted(meta.get("source_commits", {}).items()):
+        lines.append(f"- 원격 main · {repo} · {sha}")
+    if meta.get("knowledge"):
+        lines += ["", "## 확인한 사실", ""]
+    for item in meta.get("knowledge", []):
         lines.extend([item["fact"], "", f"근거 · {item['evidence']}", ""])
     content = "\n".join(lines)
     path = directory / filename
@@ -65,13 +97,25 @@ def write_note(directory, row, meta, slug):
     return filename
 
 
+def read_revisions(path, session):
+    from .git_auth import REPOS
+    receipt = json.loads(path.read_text())
+    commits = receipt.get("repositories", {})
+    if (not session or receipt.get("session_id") != session or not isinstance(commits, dict) or set(commits) != set(REPOS)
+            or not all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v)
+                       for v in commits.values())):
+        raise ValueError("관찰 세션의 원격 커밋 증명을 확인할 수 없습니다.")
+    return commits
+
+
 def index_collection(qmd_dir, name, filenames, stopping):
     script = Path(__file__).with_name("index-knowledge.mjs")
     command = ["setpriv", "--pdeathsig", "TERM", "--", "node", str(script), str(qmd_dir), name]
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as manifest:
         json.dump(filenames, manifest)
         manifest.seek(0)
-        with subprocess.Popen(command, stdin=manifest, env=dict(os.environ, XDG_CACHE_HOME=str(qmd_dir.parent))) as proc:
+        with subprocess.Popen(command, stdin=manifest, env=dict(os.environ, XDG_CACHE_HOME=str(qmd_dir.parent),
+                                                               QMD_CONFIG_DIR=str(qmd_dir))) as proc:
             while proc.poll() is None:
                 if stopping.wait(0.5):
                     proc.terminate()
@@ -100,7 +144,8 @@ def sync_pending(conn, slug, qmd_dir, retry_after, stopping):
     rows = conn.execute("""
         SELECT r.id, r.task_id, r.profile, r.ended_at, r.metadata FROM task_runs r
         WHERE r.outcome = 'completed' AND r.profile IN (?, ?)
-          AND CASE WHEN json_valid(r.metadata) THEN json_array_length(r.metadata, '$.knowledge') END > 0
+          AND CASE WHEN json_valid(r.metadata) THEN (json_array_length(r.metadata, '$.knowledge') > 0
+                   OR json_type(r.metadata, '$.source_commits') = 'object') END
           AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.run_id = r.id
                           AND e.task_id = r.task_id AND e.kind = 'knowledge_indexed')
         ORDER BY r.id

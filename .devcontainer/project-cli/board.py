@@ -40,13 +40,16 @@ def worker_boards():
 
 def project_for_checkout(path):
     from hermes_cli import projects_db as pdb
+    from tui_gateway.git_probe import common_repo_root
+
     with pdb.connect_closing() as conn:
-        project = pdb.project_for_path(conn, str(path))
-        if not project:
-            from tui_gateway.git_probe import common_repo_root
-            common = common_repo_root(str(path))
-            if common and Path(common) != path:
-                project = pdb.project_for_path(conn, common)
+        project = pdb.project_for_path(conn, str(path), include_archived=True)
+        common = common_repo_root(str(path))
+        if common and Path(common) != path:
+            primary = pdb.project_for_path(conn, common, include_archived=True)
+            if primary and project and primary.id != project.id:
+                raise ValueError("Git worktree와 실제 저장소가 서로 다른 프로젝트에 등록되어 있습니다.")
+            project = project or primary
         return project
 
 
@@ -57,11 +60,11 @@ def knowledge_root(path):
 
 def board_for_checkout(path):
     project = project_for_checkout(path)
-    if not project or not project.board_slug:
+    if not project:
         return BOARD
+    if project.archived or not project.board_slug or project.board_slug == BOARD:
+        raise ValueError(f"프로젝트 {project.name}의 전용 보드 연결을 확인하세요.")
     meta = kb.read_board_metadata(project.board_slug)
-    if not meta.get("project_id") and not meta.get("archived"):
-        return BOARD
     if meta.get("archived") or meta.get("project_id") != project.id:
         raise ValueError(f"프로젝트 {project.name}의 Kanban 보드 연결을 확인하세요.")
     return project.board_slug
@@ -79,6 +82,11 @@ def project_dir(path):
         # /workspaces itself can be the operations repo. A new project beneath
         # it must not widen its working directory to every other project.
         if checkout.is_relative_to(root) and (checkout != root or cwd == root):
+            if checkout != cwd:
+                owner = project_for_checkout(cwd)
+                enclosing = project_for_checkout(checkout)
+                if owner and (not enclosing or owner.id != enclosing.id):
+                    raise ValueError("등록된 프로젝트 밖의 Git 저장소로 작업 폴더를 확장할 수 없습니다.")
             return checkout
     return cwd
 
@@ -93,10 +101,14 @@ def enqueue(engine, prompt, cwd, session_id=None, *, key=None):
             conn, board=slug, title=prompt.strip().splitlines()[0][:120], body=prompt,
             assignee=f"cli:{engine}", created_by="project-cli",
             workspace_kind="dir", workspace_path=str(path), session_id=session_id or None,
-            max_retries=1, idempotency_key=key,
+            max_retries=1, max_runtime_seconds=runtime_limit(), idempotency_key=key,
         )
         if session_id:
             # Follow Hermes' own notification settings and authenticated calling route.
             from tools.kanban_tools import _maybe_auto_subscribe
             _maybe_auto_subscribe(conn, card)
         return slug, card
+
+
+def runtime_limit():
+    return max(0, int(os.environ.get("HERMES_CLI_MAX_RUNTIME_SECONDS", "86400")))

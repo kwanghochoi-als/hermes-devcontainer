@@ -4,6 +4,7 @@ description: Run the project's Codex and Claude Code CLIs from a persistent Herm
 provides_tools:
   - project_cli_submit
 provides_hooks:
+  - pre_tool_call
   - pre_approval_request
   - post_approval_response
   - on_human_input_request

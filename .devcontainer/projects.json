@@ -1,0 +1,22 @@
+{
+  "pharmmate": {
+    "pharmmate": "https://github.com/alssolution/pharmmate.git",
+    "pharmmate-als": "https://github.com/alssolution/pharmmate-als.git"
+  },
+  "pharmscope": {
+    "airflow-dags-als": "https://github.com/alssolution/airflow-dags-als.git",
+    "alpha-api": "https://github.com/alssolution/alpha-api.git",
+    "als-data-crawlers": "https://github.com/alssolution/als-data-crawlers.git",
+    "als-web": "https://github.com/alssolution/als-web.git",
+    "backoffice-api": "https://github.com/alssolution/backoffice-api.git",
+    "cicd/gitops-als": "https://github.com/alssolution/gitops-als.git",
+    "cicd/infra-als": "https://github.com/alssolution/infra-als.git",
+    "cicd/jenkins-als": "https://github.com/alssolution/jenkins-als.git",
+    "cicd/jenkins-lib": "https://github.com/alssolution/jenkins-lib.git",
+    "egov-master": "https://github.com/alssolution/egov-master.git",
+    "front-libs/als-api": "https://github.com/alssolution/als-api.git",
+    "front-libs/als-fe-kit": "https://github.com/alssolution/als-fe-kit.git",
+    "front-libs/eslint-config-als": "https://github.com/alssolution/eslint-config-als.git"
+  },
+  "test-prj": {}
+}

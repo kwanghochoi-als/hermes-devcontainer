@@ -45,6 +45,12 @@ def setup_cli(parser):
     submit.add_argument("--session", help="Originating Hermes session ID for follow-up tasks")
     commands.add_parser("board", help="Print the current project's Kanban board")
     commands.add_parser("knowledge", help="Print the QMD collection for findings in the current project")
+    scope = commands.add_parser("search-scope", help="Print the collections for a QMD search")
+    scope.add_argument("--all-projects", action="store_true")
+    from .layout import PROJECTS
+    restore = commands.add_parser("restore", help="Restore a managed project from the workspace manifest")
+    restore.add_argument("project", choices=sorted(PROJECTS))
+    restore.add_argument("--clone", action="store_true", help="Clone missing source repositories")
     telegram = commands.add_parser("telegram", help="Connect or inspect the Telegram operator DM")
     telegram.add_argument("operation", choices=("setup", "status"))
     git_auth = commands.add_parser("git-auth", help="Configure or check GitHub read access for Pharmmate observers")
@@ -57,7 +63,10 @@ def setup_cli(parser):
 
 
 def cli(args):
-    if args.action == "telegram":
+    if args.action == "restore":
+        from .layout import restore
+        restore(args.project, args.clone)
+    elif args.action == "telegram":
         from . import telegram
         (telegram.setup if args.operation == "setup" else telegram.status)()
     elif args.action == "git-auth":
@@ -72,6 +81,9 @@ def cli(args):
     elif args.action == "knowledge":
         from .knowledge import collection_name
         print(collection_name(knowledge_root(project_dir(Path.cwd()))))
+    elif args.action == "search-scope":
+        from .knowledge import search_scope
+        print("\n".join(search_scope(Path.cwd(), all_projects=args.all_projects)))
     elif args.action == "board":
         print(board_for_checkout(project_dir(Path.cwd())))
     else:
@@ -81,6 +93,8 @@ def cli(args):
 
 def register(ctx):
     from . import telegram
+    from .knowledge import scope_query
+    ctx.register_hook("pre_tool_call", scope_query)
     ctx.register_approval_transport(telegram.TRANSPORT, telegram.present)
     ctx.register_hook("pre_approval_request", telegram.approval_started)
     ctx.register_hook("post_approval_response", telegram.approval_finished)

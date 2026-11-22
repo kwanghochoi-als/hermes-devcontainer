@@ -1,0 +1,5 @@
+sandbox_mode = "read-only"
+approval_policy = "never"
+[features]
+hooks = true
+multi_agent = false

@@ -42,7 +42,10 @@ def credential_get():
             or owner != OWNER or repo not in REPOS):
         return
     try:
-        token = TOKEN.read_text().strip()
+        # The read-only job credential lives outside the persistent worker home.
+        source = (Path("/run/hermes-job/pharmmate.token")
+                  if os.environ.get("GIT_CONFIG_GLOBAL") == "/run/hermes-job/gitconfig" else TOKEN)
+        token = source.read_text().strip()
     except FileNotFoundError:
         return
     if token:

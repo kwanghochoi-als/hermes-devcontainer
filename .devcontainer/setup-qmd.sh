@@ -22,9 +22,13 @@ const [pkg, guideDirectory] = process.argv.slice(2);
 const { configExists, loadConfig, updateConfig } = await import(pathToFileURL(join(pkg, 'dist/collections.js')));
 const embed = 'http://host.docker.internal:11434/v1#qwen3-embedding:8b';
 const initialize = !configExists();
-if (initialize || loadConfig().models?.embed !== embed) {
+const needsScope = !initialize && Object.entries(loadConfig().collections ?? {}).some(([name, c]) => name.startsWith('learned-') && c.includeByDefault !== false);
+if (initialize || needsScope || loadConfig().models?.embed !== embed) {
   updateConfig(current => {
     current.models ??= {};
+    for (const [name, c] of Object.entries(current.collections ?? {})) {
+      if (name.startsWith('learned-')) c.includeByDefault = false;
+    }
     if (current.models.embed !== embed) {
       delete current.models.embedOptions;
       current.models.embed = embed;

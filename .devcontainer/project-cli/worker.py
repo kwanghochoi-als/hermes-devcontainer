@@ -1,6 +1,7 @@
 """Execute headless CLIs. Hermes owns the cards, claims and attempt history."""
 
 from contextlib import contextmanager
+from dataclasses import replace
 import fcntl
 import hashlib
 import json
@@ -8,7 +9,6 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-import tempfile
 import threading
 import time
 from uuid import UUID
@@ -18,10 +18,9 @@ from hermes_cli import kanban_db_context as context_sections
 from hermes_cli import kanban_db_workspace as workspaces
 from hermes_cli.kanban_db_dispatch import adopt_worker_pid, heartbeat_worker
 from hermes_constants import get_hermes_home
-from tools.environments.local import hermes_subprocess_env
 
-from .board import BOARD, LANES, board, knowledge_root, project_dir, worker_boards
-from . import knowledge
+from .board import BOARD, LANES, board, knowledge_root, project_dir, project_for_checkout, runtime_limit, worker_boards
+from . import isolation, knowledge
 
 SCHEMA = Path(__file__).with_name("result.schema.json")
 REPORT = """Execute the user's Kanban task within the project's rules. Carry out routine,
@@ -41,7 +40,6 @@ For knowledge, report reusable project facts you verified yourself, in the user'
 Cite repository-relative paths and symbols or reproducible checks and their observed results.
 Omit guesses, credentials, personal data and raw transcripts. Use an empty list when there
 is no such finding or the task is incomplete. Hermes publishes these notes after completion."""
-CONCURRENCY = 4
 
 
 def digest(*values):
@@ -65,7 +63,7 @@ def arguments(engine, session):
         args = ["codex", "exec"]
         if session:
             args += ["resume", session]
-        return args + ["--dangerously-bypass-approvals-and-sandbox", "--output-schema", str(SCHEMA),
+        return args + ["--dangerously-bypass-approvals-and-sandbox", "--output-schema", isolation.IO + "/schema.json",
                        "--json", "-"]
     args = ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json",
             "--json-schema", SCHEMA.read_text()]
@@ -130,23 +128,12 @@ class Events:
                     self.error = str(event.get("subtype", "Claude Code error"))
 
 
-def stop_group(proc):
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
-    except ProcessLookupError:
-        proc.wait()
-
-
-def task_context(conn, task):
+def task_context(conn, task, attachments=None):
     # The stock context also contains board-wide recent work by assignee.
     # cli:codex and cli:claude are shared across otherwise independent projects.
     now = int(time.time())
     lines = [f"Kanban card {task.id} in {task.workspace_path}", task.body or task.title, ""]
-    context_sections._ctx_attachments(lines, kb.list_attachments(conn, task.id))
+    context_sections._ctx_attachments(lines, kb.list_attachments(conn, task.id) if attachments is None else attachments)
     context_sections._ctx_prior_attempts(lines, conn, task.id, now)
     context_sections._ctx_parent_results(lines, conn, task.id, now)
     context_sections._ctx_comments(lines, kb.list_comments(conn, task.id), now)
@@ -163,8 +150,10 @@ def task_context(conn, task):
 
 def execute(conn, task, cwd, state, project_lock, stopping, slug):
     engine = LANES[task.assignee]
+    max_runtime = runtime_limit() if task.max_runtime_seconds is None else task.max_runtime_seconds
     observer_root = Path('/workspaces/pharmmate')
-    observer = slug == 'pharmmate' or Path(cwd).resolve().is_relative_to(observer_root)
+    project = knowledge_root(cwd)
+    observer = slug == 'pharmmate' or project == observer_root or Path(cwd).resolve().is_relative_to(observer_root)
     if observer and Path(cwd).resolve() != observer_root:
         raise RuntimeError('Pharmmate observer requires the protected workspace root.')
     session_key = digest(str(cwd), task.session_id or task.id, engine)
@@ -176,47 +165,38 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
     files = runs / task.id / str(run_id)
     files.mkdir(parents=True, exist_ok=True)
     log = files / "events.jsonl"
-    env = hermes_subprocess_env(inherit_credentials=True, base_env=dict(
-        os.environ, HERMES_KANBAN_TASK=task.id, HERMES_KANBAN_BOARD=slug,
-        HERMES_KANBAN_DB=str(kb.kanban_db_path(board=slug))))
-    env.pop("TELEGRAM_BOT_TOKEN", None)
-    # Inherit the project lock into the CLI. A replacement worker cannot edit the
-    # checkout while an earlier process is winding down.
-    cli = (['/usr/bin/python3', '-I', '-B', str(observer_root/'.observer/start.py'), engine, '--worker', str(SCHEMA)]
-           if observer else arguments(engine, events.session))
-    cmd = ["setpriv", "--pdeathsig", "TERM", "--", *cli]
-    context = task_context(conn, task)
-    with tempfile.TemporaryFile() as prompt, log.open("wb") as out, log.open("rb") as reader, \
-            (files / "stderr.log").open("wb") as err:
-        prompt.write(f"{REPORT}\n\n{context}\n".encode())
-        prompt.seek(0)
-        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=prompt, stdout=out, stderr=err,
-                                start_new_session=True, pass_fds=(project_lock.fileno(),))
-        try:
-            started = time.monotonic()
-            next_heartbeat = started
-            saved_session = False
-            while True:
-                code = proc.poll()
-                events.read(reader, finished=code is not None)
-                if events.session and not saved_session:
-                    kb.add_comment(conn, task.id, "project-cli",
-                                   f"{engine} session {events.session} · {cwd} · log {log}")
-                    saved_session = True
-                if code is not None:
-                    break
-                now = time.monotonic()
-                if stopping.is_set() or (task.max_runtime_seconds and now - started >= task.max_runtime_seconds):
-                    raise InterruptedError("실행 중단. 작업 폴더와 로그를 확인한 뒤 재개하세요.")
-                if now >= next_heartbeat:
-                    if not kb.heartbeat_claim(conn, task.id, claimer=task.claim_lock):
-                        raise RuntimeError("Kanban 작업의 소유권이 변경됐습니다.")
-                    heartbeat_worker(conn, task.id, expected_run_id=run_id)
-                    next_heartbeat = now + 15
-                stopping.wait(0.5)
-        finally:
-            if proc.poll() is None:
-                stop_group(proc)
+    cli = (["/usr/bin/python3", "-I", "-B", str(observer_root / ".observer/start.py"),
+            engine, "--worker", isolation.IO + "/schema.json"] if observer else arguments(engine, events.session))
+    items = kb.list_attachments(conn, task.id)
+    attachments = {Path(a.stored_path): f"{isolation.IO}/attachments/{i}/{Path(a.stored_path).name}"
+                   for i, a in enumerate(items)}
+    allowed = kb.task_attachments_dir(task.id, board=slug).resolve()
+    if any(not path.resolve(strict=True).is_relative_to(allowed) for path in attachments):
+        raise ValueError("카드 첨부파일 위치가 일치하지 않습니다.")
+    context = task_context(conn, task, [replace(a, stored_path=attachments[Path(a.stored_path)]) for a in items])
+    with isolation.launch(engine, cli, cwd, project, files, f"{REPORT}\n\n{context}\n",
+                          project_lock, events.session, observer, attachments) as proc, log.open("rb") as reader:
+        started = time.monotonic()
+        next_heartbeat = started
+        saved_session = False
+        while True:
+            code = proc.poll()
+            events.read(reader, finished=code is not None)
+            if events.session and not saved_session:
+                kb.add_comment(conn, task.id, "project-cli",
+                               f"{engine} session {events.session} · {cwd} · log {log}")
+                saved_session = True
+            if code is not None:
+                break
+            now = time.monotonic()
+            if stopping.is_set() or (max_runtime and now - started >= max_runtime):
+                raise InterruptedError("실행 중단. 작업 폴더와 로그를 확인한 뒤 재개하세요.")
+            if now >= next_heartbeat:
+                if not kb.heartbeat_claim(conn, task.id, claimer=task.claim_lock):
+                    raise RuntimeError("Kanban 작업의 소유권이 변경됐습니다.")
+                heartbeat_worker(conn, task.id, expected_run_id=run_id)
+                next_heartbeat = now + 15
+            stopping.wait(0.5)
     if code or not events.session or not events.success or not events.report:
         raise RuntimeError(f"{engine} 종료 코드 {code}. {events.error or '완료 보고를 확인할 수 없습니다.'} 로그 {files}")
     report = events.report
@@ -229,10 +209,12 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
                           capture_output=True, text=True).stdout.strip()
     metadata = {"agent": engine, "cli_session_id": events.session, "workspace": str(cwd),
                 "head": head or None, "tests": report["tests"], "log": str(log)}
+    if observer:
+        metadata["source_commits"] = knowledge.read_revisions(files / "revisions.json", events.session)
     findings = knowledge.findings(report.get("knowledge"))
     if findings:
         metadata["knowledge"] = findings
-        metadata["knowledge_workspace"] = str(knowledge_root(cwd))
+        metadata["knowledge_workspace"] = str(project)
     if not kb.complete_task(conn, task.id, result=summary, summary=summary, expected_run_id=run_id,
                             metadata=metadata):
         raise RuntimeError("Kanban 완료 조건 또는 실행 소유권을 확인하세요.")
@@ -245,13 +227,28 @@ def stop_event():
     return stopping
 
 
-def card_workspace(path, kind, slug, card_id):
-    if kind != "worktree":
-        return project_dir(path) if path else None
+def card_workspace(path, kind, slug, card_id, project_id):
     meta = kb.read_board_metadata(slug)
+    if kind == "dir":
+        if not path:
+            raise ValueError("카드에 작업 폴더가 없습니다.")
+        cwd = project_dir(path)
+        owner = project_for_checkout(cwd)
+        if slug == BOARD and not owner and not project_id:
+            return cwd
+        if (not owner or owner.archived or meta.get("archived") or owner.board_slug != slug
+                or owner.id != meta.get("project_id") or (project_id and project_id != owner.id)):
+            raise ValueError("카드의 보드와 실제 작업 폴더의 소유 프로젝트가 일치하지 않습니다.")
+        return cwd
+    if kind != "worktree":
+        raise ValueError("CLI 카드는 프로젝트 폴더 또는 Git worktree를 선택하세요.")
     if not meta.get("project_id") or not meta.get("default_workdir"):
         return None
     root = project_dir(meta["default_workdir"])
+    owner = project_for_checkout(root)
+    if (meta.get("archived") or not owner or owner.archived or owner.id != meta["project_id"]
+            or owner.board_slug != slug or (project_id and project_id != owner.id)):
+        raise ValueError("작업 트리와 보드의 소유 프로젝트가 일치하지 않습니다.")
     target = root / ".worktrees" / card_id
     # Native project cards reserve this path before materializing the worktree on claim.
     if target.resolve() != target or (path and Path(path).resolve() not in (root, target)):
@@ -266,13 +263,18 @@ def process_card(card_id, lock_fd, slug):
         task = kb.get_task(conn, card_id)
         if not task or task.assignee not in LANES:
             return
+        workspace_error = ""
         try:
-            workspace = card_workspace(task.workspace_path, task.workspace_kind, slug, card_id)
-        except (OSError, ValueError):
+            workspace = card_workspace(task.workspace_path, task.workspace_kind, slug, card_id, task.project_id)
+        except (OSError, ValueError) as exc:
             workspace = None
-        if not os.path.samestat(os.fstat(lock_fd), (state / "locks" / digest(str(workspace))).stat()):
-            raise RuntimeError("작업 폴더와 잠금 파일이 일치하지 않습니다.")
+            workspace_error = str(exc)
+        lock_path = state / "locks" / digest(str(workspace))
+        if not lock_path.exists() or not os.path.samestat(os.fstat(lock_fd), lock_path.stat()):
+            return  # Board or checkout changed between scheduling and claim. Resolve it again.
         if task.status == "running":
+            if workspace:
+                isolation.reap_checkout(workspace)
             # Nobody holds its checkout lock, including the previous CLI. Its last
             # command might already have changed files; let the user reconcile it.
             kb.block_task(conn, card_id, reason="이전 워커가 중단되었습니다. 작업 폴더와 실행 로그를 확인하세요.",
@@ -285,11 +287,16 @@ def process_card(card_id, lock_fd, slug):
             if not adopt_worker_pid(conn, task.id, task.current_run_id, os.getpid()):
                 return
             if not workspace or task.workspace_kind not in ("dir", "worktree"):
-                raise ValueError("프로젝트 폴더 또는 프로젝트 보드의 Kanban worktree가 필요합니다.")
+                raise ValueError(workspace_error or "프로젝트 폴더 또는 프로젝트 보드의 Kanban worktree가 필요합니다.")
+            if workspace != card_workspace(task.workspace_path, task.workspace_kind, slug, card_id, task.project_id):
+                raise ValueError("카드를 가져오는 동안 프로젝트 작업 폴더가 변경됐습니다.")
             if task.workspace_kind == "worktree":
                 actual = workspaces.resolve_workspace(task, board=slug)
                 if actual.resolve() != workspace:
                     raise ValueError("Kanban worktree가 예약한 작업 폴더와 일치하지 않습니다.")
+                owner = project_for_checkout(actual.resolve())
+                if not owner or owner.board_slug != slug:
+                    raise ValueError("생성한 Git worktree와 보드의 소유 프로젝트가 일치하지 않습니다.")
                 workspaces.set_workspace_path(conn, task.id, workspace)
                 task.workspace_path = str(workspace)
             execute(conn, task, workspace, state, lock, stopping, slug)
@@ -310,49 +317,49 @@ def serve():
         indexer = threading.Thread(target=knowledge.watch, args=(stopping,), name="qmd-indexer", daemon=True)
         indexer.start()
         active = {}
-        projects = {}
+        total_limit = max(1, int(os.environ.get("HERMES_CLI_CONCURRENCY", "4")))
+        project_limit = max(1, int(os.environ.get("HERMES_CLI_PROJECT_CONCURRENCY", "2")))
         try:
             while not stopping.is_set():
-                active = {project: child for project, child in active.items() if child.poll() is None}
+                active = {path: item for path, item in active.items() if item[1].poll() is None}
                 # A running attempt precedes a waiting card, then preserve FIFO
                 # even when two requests have the same one-second creation time.
                 rows = []
                 for slug, conn in refresh().items():
                     rows.extend(conn.execute("""
-                        SELECT id, workspace_path, workspace_kind, (status = 'ready') AS waiting, created_at,
+                        SELECT id, project_id, workspace_path, workspace_kind, (status = 'ready') AS waiting, created_at,
                                rowid AS sequence, ? AS board FROM tasks
                         WHERE assignee IN (?, ?) AND status IN ('running', 'ready')
                     """, (slug, *LANES)))
                 rows.sort(key=lambda row: (row["waiting"], row["created_at"], row["sequence"], row["board"]))
-                paths = {row["workspace_path"] for row in rows if row["workspace_kind"] == "dir"}
-                projects = {path: cwd for path, cwd in projects.items() if path in paths}
+                resolved = {}
                 for row in rows:
-                    if len(active) >= CONCURRENCY:
+                    if len(active) >= total_limit:
                         break
                     path = row["workspace_path"]
-                    if row["workspace_kind"] != "dir" or path not in projects:
+                    key = (row["board"], row["project_id"], row["workspace_kind"], path,
+                           row["id"] if row["workspace_kind"] == "worktree" else None)
+                    if key not in resolved:
                         try:
-                            workspace = card_workspace(path, row["workspace_kind"], row["board"], row["id"])
+                            resolved[key] = card_workspace(path, row["workspace_kind"], row["board"], row["id"], row["project_id"])
                         except (OSError, ValueError):
-                            workspace = None
-                        if row["workspace_kind"] == "dir":
-                            projects[path] = workspace
-                    else:
-                        workspace = projects[path]
-                    if workspace in active:
+                            resolved[key] = None
+                    workspace = resolved[key]
+                    group = row["board"] if row["board"] != BOARD else workspace
+                    if workspace in active or sum(owner == group for owner, _ in active.values()) >= project_limit:
                         continue
                     with try_lock(state / "locks" / digest(str(workspace))) as lock:
                         if lock is not None:
                             cmd = ["setpriv", "--pdeathsig", "TERM", "--", "hermes", "project-cli",
                                    "run-card", row["id"], str(lock.fileno()), "--board", row["board"]]
-                            active[workspace] = subprocess.Popen(cmd, pass_fds=(lock.fileno(),),
-                                                                 start_new_session=True)
+                            active[workspace] = group, subprocess.Popen(cmd, pass_fds=(lock.fileno(),),
+                                                                         start_new_session=True)
                 stopping.wait(1)
         finally:
             stopping.set()
-            for child in active.values():
+            for _, child in active.values():
                 if child.poll() is None:
                     child.terminate()
-            for child in active.values():
+            for _, child in active.values():
                 child.wait()
             indexer.join(timeout=5)

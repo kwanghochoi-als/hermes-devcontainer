@@ -8,7 +8,8 @@ import time
 from hermes_cli import kanban_db as kb
 
 from . import telegram as tg
-from .board import LANES, board, worker_boards
+from hermes_constants import get_hermes_home
+from .board import BOARD, LANES, board, worker_boards
 
 log = logging.getLogger(__name__)
 REPORTS = {"completed": "작업 완료", "blocked": "사람의 확인 필요", "review_requested": "검토 요청",
@@ -26,6 +27,83 @@ def pending_status(conn, card, event):
     if row and row["status"] in ("blocked", "triage") and row["last"] == event:
         return row["status"]
     return None
+
+
+def pending_event(conn, card):
+    row = conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected') "
+                       "ORDER BY id DESC LIMIT 1", (card,)).fetchone()
+    if row and pending_status(conn, card, row["id"]):
+        return kb.Event.from_row(row)
+    return None
+
+
+def technical_block(assignee, kind):
+    return assignee in LANES and kind in ("transient", "capability")
+
+
+def work_status(selected=""):
+    lines = ["Hermes 프로젝트 작업"]
+    with worker_boards() as refresh:
+        boards = refresh()
+        if selected and selected not in boards:
+            return "조회할 보드 · " + ", ".join(sorted(boards))
+        for slug, conn in boards.items():
+            if selected and slug != selected:
+                continue
+            rows = conn.execute("SELECT id,title,status,assignee,block_kind,current_run_id,last_heartbeat_at FROM tasks "
+                                "WHERE status NOT IN ('done','archived','cancelled') ORDER BY created_at,id").fetchall()
+            counts = {}
+            details = []
+            for row in rows:
+                card, state = row["id"], row["status"]
+                label = {"ready": "실행 대기", "running": "실행 중", "review": "검토",
+                         "todo": "예정", "triage": "분류 대기"}.get(state, state)
+                hint = ""
+                if state in ("blocked", "triage"):
+                    event = pending_event(conn, card)
+                    if technical_block(row["assignee"], row["block_kind"]):
+                        label = "실행 오류"
+                    elif event:
+                        label = "승인 대기"
+                        hint = f" · /workrequest {slug} {card}"
+                    elif state == "blocked":
+                        label = "보류"
+                if state == "running" and row["assignee"] in LANES:
+                    base = get_hermes_home() / "cli-workers"
+                    runs = base / "runs" if slug == BOARD else base / "boards" / slug / "runs"
+                    folder = runs / card / str(row["current_run_id"])
+                    latest = max((p.stat().st_mtime for p in (folder / "events.jsonl", folder / "stderr.log")
+                                  if p.is_file() and p.stat().st_size), default=None)
+                    hint = (f" · 마지막 출력 {max(0, int(time.time() - latest)) // 60}분 전"
+                            if latest else " · 첫 출력 대기")
+                    heartbeat = kb._to_epoch(row["last_heartbeat_at"])
+                    if heartbeat:
+                        hint += f" · 워커 응답 {max(0, int(time.time() - heartbeat))}초 전"
+                counts[label] = counts.get(label, 0) + 1
+                if selected or hint:
+                    details.append(f"  {card} · {label} · {tg.clean(row['title'])[:80]}{hint}")
+            lines.append(f"{slug} · " + (", ".join(f"{k} {v}" for k,v in counts.items()) or "대기 작업 없음"))
+            lines.extend(details)
+    return "\n".join(lines)
+
+
+def reissue(channel, parts):
+    if len(parts) != 2:
+        return "/workrequest <보드> <카드>"
+    slug, card = parts
+    with worker_boards() as refresh:
+        conn = refresh().get(slug)
+        if conn is None:
+            return tg.STALE
+        event = pending_event(conn, card)
+        if not event:
+            return tg.STALE
+        task = kb.get_task(conn, card)
+        if not task or technical_block(task.assignee, (event.payload or {}).get("kind")):
+            return tg.STALE
+        if not publish(channel, slug, conn, event):
+            return tg.STALE
+        return f"{slug} · {card} 승인 요청을 다시 표시했습니다."
 
 
 def decide(row, action, reply):
@@ -64,7 +142,7 @@ def publish(channel, slug, kanban, event):
     project = Path(task.workspace_path).name if task.workspace_path else slug
     needs_decision = event.kind in ("blocked", "block_loop_detected")
     title = REPORTS[event.kind]
-    if needs_decision and task.assignee in LANES and detail.get("kind") in ("capability", "transient"):
+    if needs_decision and technical_block(task.assignee, detail.get("kind")):
         needs_decision = False
         title = "작업 실행 오류" if event.kind == "blocked" else "반복 실행 오류"
     header = f"{title} · {project} · {task.assignee or 'Hermes'}\n보드 {slug} · 카드 {task.id}"
@@ -86,6 +164,7 @@ def publish(channel, slug, kanban, event):
         message += (f"\n\n카드 재개 승인 · /workok {ref}\n보류 · /workno {ref}"
                     f"\n답변 후 재개 · /workreply {ref} <답변>")
     tg.send(channel, message, ref)
+    return True
 
 
 def drain(channel, slug, kanban):

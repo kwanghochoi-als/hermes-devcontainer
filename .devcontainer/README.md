@@ -30,7 +30,9 @@ hermes kanban --board test-prj runs <카드-ID>
 ## 실행과 재개
 
 - 일반 프로젝트에서 워커는 `codex exec --dangerously-bypass-approvals-and-sandbox` 또는 `claude -p --dangerously-skip-permissions`로 실행합니다. 새 카드와 세션 재개에 같은 옵션을 적용합니다. Pharmmate 관찰 전용 보드는 대화형 승인 없이 원격 `main`의 고정된 커밋만 조회하는 전용 실행기를 사용합니다.
-- 같은 checkout의 요청은 접수 순서대로 실행하고, 서로 다른 checkout은 최대 네 곳까지 병렬로 처리합니다. 독립된 변경은 별도 Git worktree에서 Hermes를 열어 맡길 수 있습니다.
+- 워커는 프로젝트와 CLI마다 인증·세션용 홈을 두고 카드마다 별도 Docker 컨테이너를 실행합니다. 일반 카드에는 선택한 checkout, 연결된 worktree의 공통 Git 메타데이터, 해당 카드의 첨부파일을 연결합니다. 워커에서는 컨트롤러의 Docker 소켓, Hermes DB, 다른 프로젝트 홈에 접근할 수 없습니다. 운영 저장소 자체에 작업을 위임할 때는 `/workspaces`의 별도 Git worktree를 엽니다.
+- 같은 checkout에서는 한 번에 한 카드를 접수 순서대로 실행합니다. 기본 병렬 한도는 전체 4개, 프로젝트당 2개입니다. 별도 worktree에 접수하면 같은 프로젝트에서도 두 작업을 진행할 수 있습니다. 기본 실행 한도는 24시간이며, Kanban 카드에 지정한 `--max-runtime`이 우선합니다. Compose 환경 변수 `HERMES_CLI_CONCURRENCY`, `HERMES_CLI_PROJECT_CONCURRENCY`, `HERMES_CLI_MAX_RUNTIME_SECONDS`로 조정할 수 있습니다. 실행 시간에 0을 지정하면 시간제한이 해제됩니다.
+- 위임을 접수하고 워커가 카드를 가져갈 때 보드의 프로젝트 ID, 폴더 소유자, Git worktree의 원본을 검증합니다. 다른 프로젝트를 가리키는 수동 생성 카드는 원인을 기록하고 차단됩니다.
 - 같은 Hermes 세션·checkout·CLI의 후속 카드는 저장한 원본 CLI 세션 ID로 재개됩니다. 다른 CLI로 넘길 때는 같은 세션과 checkout에서 마지막으로 완료한 카드의 요약과 테스트 결과를 함께 전달합니다. 셸에서 같은 대화로 이어가려면 제출할 때 동일한 `--session <Hermes-세션-ID>`를 지정합니다.
 - 워커가 성공적으로 종료하고 완료 보고를 반환하면 카드에 결과, 보고된 테스트, 현재 HEAD, CLI 세션 ID와 로그 경로가 기록됩니다. 승인 필요, CLI 오류, 완료 보고 누락, 실행 도중 워커 중단은 `blocked`로 처리합니다. 실제 변경과 실행별 로그를 확인한 뒤 `hermes kanban --board test-prj unblock <카드-ID>`로 같은 작업을 다시 맡길 수 있습니다.
 - 게이트웨이와 CLI 워커는 독립 프로세스입니다. 터미널을 닫거나 게이트웨이를 재시작해도 워커는 계속 실행됩니다. 컨테이너가 멈추면 다음 기동에서 대기 카드를 이어 처리하고 중단된 시도의 기록을 보존합니다.
@@ -57,7 +59,13 @@ hermes project-cli telegram setup
 hermes project-cli telegram status
 ```
 
-설정 명령은 Telegram에서 봇과 개인 대화를 확인한 뒤 운영자를 등록하고 게이트웨이를 재시작합니다. 봇에 `/workstatus`를 보내 연결을 확인합니다. 토큰과 수신 설정은 컨테이너의 `~/.hermes` 볼륨에 저장됩니다.
+설정 명령은 Telegram에서 봇과 개인 대화를 확인한 뒤 운영자를 등록하고 게이트웨이를 재시작합니다. 토큰과 수신 설정은 컨테이너의 `~/.hermes` 볼륨에 저장됩니다.
+
+| 운영자 개인 대화 명령 | 결과 |
+| --- | --- |
+| `/workstatus` | 활성 프로젝트 보드와 공용 보드의 실행 중·대기·승인 대기·실행 오류 건수를 봅니다. 실행 중인 CLI 카드에는 마지막 실제 출력 이후 경과 시간이 표시됩니다. |
+| `/workstatus test-prj` | 해당 보드의 미완료 카드 ID, 제목, 상태를 봅니다. |
+| `/workrequest test-prj <카드-ID>` | 현재도 답변을 기다리는 카드의 승인·거절·답변 버튼을 다시 받습니다. Telegram 연결 전에 차단된 카드에도 사용할 수 있습니다. 거절·해결된 요청과 CLI 실행 오류는 재발급 대상에서 제외됩니다. |
 
 | DM에 온 메시지 | 처리 방법 |
 | --- | --- |
@@ -92,13 +100,16 @@ qmd embed
 
 `/codex`와 `/claude` 워커는 작업 중 직접 확인한 프로젝트 사실과 근거 파일·테스트를 완료 보고에 담습니다. 근거가 있는 발견이 있으면 백그라운드 워커가 완료된 실행마다 Markdown 한 파일을 저장하고, 이 프로젝트의 QMD 컬렉션을 자동 등록·갱신합니다. 문서에는 카드 ID, 워커, 완료 시각, 확인 당시의 Git HEAD(있는 경우)가 함께 기록됩니다. 차단된 작업과 발견이 없는 작업은 건너뜁니다.
 
-새 Hermes 대화에서도 같은 프로젝트 폴더를 열고 “이전에 확인한 재시도 정책을 근거와 함께 찾아줘”처럼 요청할 수 있습니다. 프로젝트의 등록 폴더와 연결된 Git worktree는 프로젝트 생성 시 준비된 컬렉션을 함께 사용합니다. 미등록 checkout에는 첫 발견을 저장할 때 개별 컬렉션이 생깁니다. 터미널에서는 다음 명령으로 검색합니다.
+Hermes의 QMD 질의와 셸의 `qmd search`, `query`, `vsearch`는 현재 프로젝트의 지식을 기본으로 검색합니다. 연결된 Git worktree도 같은 컬렉션을 사용합니다. 운영 폴더에서 검색하면 운영 가이드를 조회합니다. 전체 지식과 별도 등록한 문서를 함께 찾으려면 셸에서는 `--all-projects`, Hermes QMD 도구에서는 `collections: ["*"]`를 지정합니다. 특정 문서 컬렉션은 `-c <이름>` 또는 MCP의 `collections`로 직접 선택합니다.
 
 ```bash
-qmd query 'vec: 이전에 확인한 재시도 정책' -c "$(hermes project-cli knowledge)" --no-rerank
+qmd query 'vec: 이전에 확인한 재시도 정책' --no-rerank
+qmd search '재시도 정책' --all-projects
 ```
 
 카드 완료와 색인은 독립적으로 처리됩니다. Ollama 연결이 끊기면 완료 보고와 Markdown이 남고, 워커가 30초 후 색인을 다시 시도합니다. 워커를 재시작해도 미처리 보고를 읽어 재개합니다. 성공하면 `hermes kanban --board test-prj show <카드-ID> --json`의 `knowledge_indexed` 이벤트에 검색 가능한 문서 주소가 기록됩니다.
+
+Pharmmate 관찰이 완료되면 그 CLI 세션이 실제로 읽을 수 있었던 원격 6곳의 저장소 이름과 `main` 커밋 SHA를 Kanban 실행의 `source_commits`와 QMD 문서에 기록합니다. 이 경우에는 별도 지식 항목이 없어도 출처 문서를 만듭니다.
 
 ## 저장 위치
 
@@ -109,13 +120,25 @@ qmd query 'vec: 이전에 확인한 재시도 정책' -c "$(hermes project-cli k
 | QMD 설정·문서 색인·모델 캐시 | 같은 볼륨의 `qmd/index.yml`, `qmd/index.sqlite`, `qmd/models/` |
 | 완료 카드에서 확인한 프로젝트 지식 | 같은 볼륨의 `qmd/knowledge/<컬렉션>/`에 보드·카드·실행별 Markdown |
 | CLI 세션 연결 정보·실행별 로그 | 같은 볼륨의 `cli-workers/sessions` 및 `cli-workers/boards/<보드>/runs/`. 공용 보드의 로그는 `cli-workers/runs/` |
-| Codex 및 Claude 원본 인증·대화 | `codex_home`, `claude_home` 볼륨 |
+| 컨트롤러 CLI 로그인 | `codex_home`, `claude_home` 볼륨. 로그인 갱신과 기본 모델 선택은 다음 작업에서 워커에 적용됩니다. |
+| 격리 워커의 프로젝트별 CLI 홈·대화 | `hermes_home` 볼륨의 `cli-workers/homes/`. 전환 이전 세션을 재개할 때는 해당 세션의 대화 파일을 가져옵니다. |
 
 ## 초기 설치
 
 VS Code에서 **Dev Containers: Rebuild Container**를 실행하면 Docker Compose가 영속 볼륨을 만들거나 기존 볼륨을 연결합니다. 초기 설치가 끝나면 아래 순서로 두 CLI와 Hermes를 인증합니다.
 
 초기 설치는 `.devcontainer/setup-projects.sh`에서 Hermes 기본 생성기와 웹앱 폼에 연동 패치를 적용한 다음 웹앱을 빌드합니다.
+
+### 새 호스트에서 프로젝트 복원
+
+운영 저장소에는 `.devcontainer/projects.json`의 상대 경로·원격 목록과 `.devcontainer/observer/`의 Pharmmate 관찰 정책이 들어 있습니다. 초기 기동에서는 프로젝트 데이터를 만들지 않습니다. 다음 명령은 지정한 프로젝트의 Git 루트, 보드, 시작 세션, QMD 컬렉션을 준비합니다. `--clone`을 붙이면 현재 Git 자격 증명으로 목록에서 빠진 checkout을 내려받습니다. 같은 origin의 기존 checkout은 그대로 사용하며, 다른 origin이 있으면 해당 경로를 표시하고 중단합니다.
+
+```bash
+hermes project-cli restore pharmmate
+hermes project-cli restore pharmscope --clone
+```
+
+Pharmmate 관찰은 `git-auth setup`에 등록한 권한으로 여섯 원격을 직접 조회하므로 소스 checkout이 없는 새 호스트에서도 실행할 수 있습니다.
 
 ### 1. 코딩 에이전트 로그인
 

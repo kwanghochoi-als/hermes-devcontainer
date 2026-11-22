@@ -50,6 +50,24 @@ def git_repo(path, root):
             "commit", "--quiet", "--allow-empty", "--only", "-m", "Initialize project")
 
 
+def exclude_managed_repo(root, path):
+    if not (root / ".devcontainer/projects.json").is_file() or not (root / ".git").is_dir():
+        return
+    relative = path.relative_to(root).as_posix()
+    if any(c in relative for c in "\r\n"):
+        return
+    base = ["git", "--literal-pathspecs", "-C", str(root)]
+    if subprocess.run([*base, "ls-files", "-z", "--", relative], capture_output=True, check=True).stdout:
+        return
+    if subprocess.run(["git", "-C", str(root), "check-ignore", "-q", "--", "./" + relative], check=False).returncode == 0:
+        return
+    pattern = "".join("\\" + c if c in "\\*?[" else c for c in relative)
+    exclude = root / ".git/info/exclude"
+    exclude.parent.mkdir(exist_ok=True)
+    with exclude.open("a") as file:
+        file.write(f"\n/{pattern}/\n")
+
+
 def existing_session(conn, sessions, project, path, title):
     from hermes_cli import projects_db as pdb
 
@@ -140,6 +158,9 @@ def workspace_creator(native_create):
                 raise ValueError(f"이미 사용 중인 Kanban 보드입니다 · {board_name}")
             existing_sid = existing_session(conn, sessions, old, path, title)
             git_repo(path, root)
+            if path == root / "pharmmate":
+                from .layout import install_observer
+                install_observer(path)
             try:
                 collection = register_collection(path)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -158,5 +179,6 @@ def workspace_creator(native_create):
             if owner != pid or meta.get("default_workdir") != str(path) or not kb.kanban_db_path(board_name).exists():
                 kb.create_board(board_name, name=name, default_workdir=str(path), project_id=pid)
             starter_session(conn, sessions, pdb.get_project(conn, pid), path, title, collection, existing_sid)
+            exclude_managed_repo(root, path)
             return pid
     return create

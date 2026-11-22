@@ -1,0 +1,6 @@
+allow_managed_hooks_only = true
+allowed_approval_policies = ["never"]
+allowed_sandbox_modes = ["read-only"]
+
+[features]
+hooks = true

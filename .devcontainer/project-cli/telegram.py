@@ -25,7 +25,7 @@ from hermes_constants import get_hermes_home
 
 TRANSPORT = "project-telegram"
 STALE = "이미 처리됐거나 만료된 요청입니다."
-OPERATOR_COMMANDS = {"workok", "workno", "workreply", "workstatus"}
+OPERATOR_COMMANDS = {"workok", "workno", "workreply", "workstatus", "workrequest"}
 LOCAL_SURFACES = {"", "cli", "local", "tui", "desktop", "gui", "acp", "kanban"}
 
 
@@ -237,7 +237,8 @@ def wire(application, adapter):
                 await query.edit_message_text(f"{query.message.text}\n\n{result[:180]}",
                                               reply_markup=None, disable_web_page_preview=True)
         else:
-            await update.message.reply_text(result)
+            for pos in range(0, len(result), 1800):
+                await update.message.reply_text(result[pos:pos + 1800])
 
     application.add_handler(CallbackQueryHandler(receive, pattern=r"^hwork:(?:ok|no):[akq][a-f0-9]{16}$"))
     application.add_handler(CommandHandler(sorted(OPERATOR_COMMANDS), receive, filters=filters.UpdateType.MESSAGE))
@@ -255,8 +256,9 @@ def process_identity(pid):
 
 
 def command(action, raw, channel):
-    if action == "status":
-        return "Hermes 운영자 DM이 연결되어 있습니다."
+    if action in ("status", "request"):
+        from .telegram_kanban import work_status, reissue
+        return work_status(raw.strip()) if action == "status" else reissue(channel, raw.split())
     parts = raw.strip().split(maxsplit=1)
     if not parts or (action == "reply") != (len(parts) == 2):
         hint = " <답변>" if action == "reply" else ""

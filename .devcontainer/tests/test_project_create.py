@@ -12,6 +12,9 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
+
+import fixture_transport
 
 from test_cli_knowledge import Embeddings
 from test_cli_workers import FAKE_CLI
@@ -23,9 +26,11 @@ class ProjectCreation(unittest.TestCase):
             root = Path(tmp)
             home, projects = root / "home", root / "projects"
             projects.mkdir()
-            plugin = Path(__file__).resolve().parents[1] / "project-cli"
+            subprocess.run(["git", "init", "-q", projects], check=True)
+            (projects / ".devcontainer").mkdir()
+            (projects / ".devcontainer/projects.json").write_text("{}")
             (home / "plugins").mkdir(parents=True)
-            (home / "plugins/project-cli").symlink_to(plugin)
+            fixture_transport.install(home)
             (home / "config.yaml").write_text("plugins:\n  enabled: [project-cli]\n")
             (home / "qmd").mkdir()
             api = resources.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), Embeddings))
@@ -40,7 +45,9 @@ class ProjectCreation(unittest.TestCase):
             for engine in ("codex", "claude"):
                 (bins / engine).write_text(FAKE_CLI)
                 (bins / engine).chmod(0o755)
-            env = dict(os.environ, HERMES_HOME=str(home), HERMES_KANBAN_HOME=str(home),
+            gate = root / "allow-first-card"
+            env = dict(os.environ, HERMES_HOME=str(home), HERMES_KANBAN_HOME=str(home), PROBE_GATE=str(gate),
+                       HERMES_CLI_CONCURRENCY="2", HERMES_CLI_PROJECT_CONCURRENCY="1", HERMES_CLI_MAX_RUNTIME_SECONDS="86400",
                        HERMES_DASHBOARD_FILES_ROOT=str(projects), PATH=f"{bins}:{os.environ['PATH']}")
             env.pop("HERMES_KANBAN_DB", None)
 
@@ -50,6 +57,15 @@ class ProjectCreation(unittest.TestCase):
             def rows(db, query, *params):
                 with closing(sqlite3.connect(db)) as conn:
                     return conn.execute(query, params).fetchall()
+
+            def wait_card(slug, card, status):
+                db = home / "kanban/boards" / slug / "kanban.db"
+                end = time.monotonic() + 40
+                while time.monotonic() < end:
+                    if rows(db, "SELECT status FROM tasks WHERE id=?", card) == [(status,)]:
+                        return
+                    time.sleep(0.2)
+                self.fail(str(rows(db, "SELECT status,block_kind FROM tasks WHERE id=?", card)))
 
             run("hermes", "kanban", "boards", "create", "cli-workers")
             process = subprocess.Popen(["hermes", "project-cli", "serve"], env=env)
@@ -117,6 +133,9 @@ class ProjectCreation(unittest.TestCase):
                 run("git", "worktree", "add", "--quiet", "--detach", str(sibling), "HEAD", cwd=repo)
                 self.assertEqual(run("hermes", "project-cli", "board", cwd=sibling), "test-prj")
                 self.assertEqual(run("hermes", "project-cli", "knowledge", cwd=sibling), collection)
+                self.assertEqual(run("hermes", "project-cli", "search-scope", cwd=sibling), collection)
+                self.assertEqual(rows(board / "kanban.db", "SELECT max_runtime_seconds FROM tasks WHERE id=?", first), [(86400,)])
+                self.assertEqual(run("git", "check-ignore", "test-prj"), "test-prj")
 
                 other = projects / "other"
                 run("git", "init", "-q", "-b", "existing", str(other))
@@ -131,7 +150,48 @@ class ProjectCreation(unittest.TestCase):
                                  [(str(other), "other")])
                 self.assertEqual(run("git", "diff", "--cached", "--name-only", cwd=other), "staged.txt")
                 self.assertEqual(run("git", "branch", "--show-current", cwd=other), "existing")
-                self.assertNotEqual(run("hermes", "project-cli", "knowledge", cwd=other), collection)
+                other_collection = run("hermes", "project-cli", "knowledge", cwd=other)
+                self.assertNotEqual(other_collection, collection)
+                self.assertCountEqual(run("hermes", "project-cli", "search-scope", "--all-projects", cwd=sibling).splitlines(),
+                                      [collection, other_collection])
+                wrong = json.loads(run("hermes", "kanban", "--board", "test-prj", "create", "wrong board",
+                                       "--workspace", f"dir:{other}", "--assignee", "cli:claude", "--json"))["id"]
+                wait_card("test-prj", wrong, "blocked")
+                self.assertEqual(rows(board / "kanban.db", "SELECT block_kind FROM tasks WHERE id=?", wrong), [("capability",)])
+                self.assertFalse((other / ".probe-args.json").exists())
+                held = run("hermes", "project-cli", "submit", "codex", "WAIT_FOR_RESTART", cwd=repo)
+                wait_card("test-prj", held, "running")
+                queued = run("hermes", "project-cli", "submit", "claude", "parallel worktree", cwd=sibling)
+                independent = run("hermes", "project-cli", "submit", "claude", "independent project", cwd=other)
+                wait_card("other", independent, "done")
+                wait_card("test-prj", queued, "ready")
+                gate.touch()
+                wait_card("test-prj", queued, "done")
+
+                run("hermes", "project-cli", "restore", "pharmmate")
+                policy = projects / "pharmmate/.observer"
+                self.assertTrue((policy / "start.py").is_symlink())
+                self.assertIn("pharmmate", json.loads((policy / "sources.json").read_text()))
+                self.assertFalse((projects / "pharmmate/pharmmate").exists())
+                # Route both inventory origins to a fixture without changing their stored URLs.
+                mirrors = root / "fixture-mirrors"
+                mirrors.mkdir()
+                for name in ("pharmmate", "pharmmate-als"):
+                    run("git", "clone", "--quiet", "--bare", str(repo), str(mirrors / f"{name}.git"))
+                with patch.dict(env, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"url.{mirrors.as_uri()}/.insteadOf",
+                                GIT_CONFIG_VALUE_0="https://github.com/alssolution/"):
+                    run("hermes", "project-cli", "restore", "pharmmate", "--clone")
+                    clone = projects / "pharmmate/pharmmate"
+                    keep = clone / "local-edit"
+                    keep.write_text("wip")
+                    run("hermes", "project-cli", "restore", "pharmmate", "--clone")
+                    self.assertEqual(keep.read_text(), "wip")
+                    run("git", "remote", "set-url", "origin", "local-only", cwd=clone)
+                    refused = subprocess.run(["hermes", "project-cli", "restore", "pharmmate", "--clone"],
+                                             cwd=projects, env=env, capture_output=True)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertEqual(run("git", "remote", "get-url", "origin", cwd=clone), "local-only")
+                self.assertEqual(rows(home / "state.db", "SELECT count(*) FROM sessions WHERE title='pharmmate-세션'"), [(1,)])
                 attempt = subprocess.run(["hermes", "project", "create", "../outside"], env=env, cwd=projects,
                                          capture_output=True)
                 self.assertNotEqual(attempt.returncode, 0)
