@@ -19,23 +19,27 @@ from hermes_cli import kanban_db_workspace as workspaces
 from hermes_cli.kanban_db_dispatch import adopt_worker_pid, heartbeat_worker
 from hermes_constants import get_hermes_home
 
-from .board import BOARD, LANES, board, knowledge_root, project_dir, project_for_checkout, runtime_limit, worker_boards
+from .board import (BOARD, LANES, EnvironmentActionRequired, board, knowledge_root, project_dir, project_for_checkout,
+                    runtime_limit, worker_boards)
 from . import isolation, knowledge
 
 SCHEMA = Path(__file__).with_name("result.schema.json")
 REPORT = """Execute the user's Kanban task within the project's rules. Carry out routine,
 reversible work in scope, including inspection, local edits, builds, tests and troubleshooting,
 without asking for permission. Make ordinary implementation choices yourself.
-Before taking an action that needs an operator decision, stop and report blocked. Ask only
-for a material choice you cannot resolve from the task (such as a change of product scope),
-or for authorization missing for the specific action and target (such as a production deploy,
-external publication or message, irreversible data loss, new spending or access changes).
-State the question or proposed action, target and effect in the summary. Honor explicit
-authorization already given for this card. On resume, match the operator's answer in this
-card's comments to the original proposal and carry out only the scope they approved.
+When operator intervention is necessary, report blocked and select one request_kind:
+approval for a specific action requiring authorization (such as a production deploy, irreversible
+data loss, spending or access changes). State the action, target and effect for a yes/no decision.
+materials for information, a file or a product choice you cannot find or resolve yourself. Ask for
+the specific item or decision. environment for a prerequisite only the operator can restore, such as
+a CLI login or unavailable host service. Give the observed failure, the local fix and a verification
+step. Credentials belong in the local credential setup. Use the user's language for the request.
+Honor existing authorization. On resume, follow the answer on this card. Supplied materials and
+environment confirmations do not grant permission for new actions. Recheck the prerequisite before
+continuing. Use request_kind none for completed or failed.
 Check prior attempts before repeating an action with external effects.
-Try safe recovery from technical errors. If a technical obstacle persists, report failed
-with the cause. Include the tests actually run and their results in the final report.
+Try safe recovery from technical errors. If an error persists and you cannot identify a specific
+operator-side fix, report failed with the cause. Include the tests actually run and their results.
 For knowledge, report reusable project facts you verified yourself, in the user's language.
 Cite repository-relative paths and symbols or reproducible checks and their observed results.
 Omit guesses, credentials, personal data and raw transcripts. Use an empty list when there
@@ -204,13 +208,22 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
                 heartbeat_worker(conn, task.id, expected_run_id=run_id)
                 next_heartbeat = now + 15
             stopping.wait(0.5)
+    if observer and not events.success and events.error.startswith("BLOCKED:"):
+        check = ("devcontainer에서 hermes project-cli git-auth status로 원격 main 읽기 권한과 연결을 확인하세요."
+                 if "원격 main" in events.error else "devcontainer에서 관찰 실행기의 훅 설정과 실행 로그를 확인하세요.")
+        raise EnvironmentActionRequired(f"{events.error}\n{check}\n로그 · {files}")
     if code or not events.session or not events.success or not events.report:
         raise RuntimeError(f"{engine} 종료 코드 {code}. {events.error or '완료 보고를 확인할 수 없습니다.'} 로그 {files}")
     report = events.report
     summary = f"{report['summary']}\n\n테스트 · {report['tests']}"
     if report["status"] != "completed":
-        kind = "needs_input" if report["status"] == "blocked" else "capability"
-        kb.block_task(conn, task.id, reason=summary, kind=kind, expected_run_id=run_id)
+        request = None
+        if report["status"] == "blocked":
+            request = report.get("request_kind")
+            if request not in ("approval", "materials", "environment"):
+                request = "materials"  # An untyped question needs an explicit answer.
+        kind = "needs_input" if request in ("approval", "materials") else "capability"
+        kb.block_task(conn, task.id, reason=summary, kind=kind, request_kind=request, expected_run_id=run_id)
         return
     head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=cwd,
                           capture_output=True, text=True).stdout.strip()
@@ -283,7 +296,12 @@ def process_card(card_id, lock_fd, slug):
             return  # Board or checkout changed between scheduling and claim. Resolve it again.
         if task.status == "running":
             if workspace:
-                isolation.reap_checkout(workspace)
+                try:
+                    isolation.reap_checkout(workspace)
+                except EnvironmentActionRequired as exc:
+                    kb.block_task(conn, card_id, reason=f"중단된 워커의 정리 상태와 작업 폴더를 확인하세요.\n{exc}",
+                                  kind="transient", request_kind="environment", expected_run_id=task.current_run_id)
+                    return
             # Nobody holds its checkout lock, including the previous CLI. Its last
             # command might already have changed files; let the user reconcile it.
             kb.block_task(conn, card_id, reason="이전 워커가 중단되었습니다. 작업 폴더와 실행 로그를 확인하세요.",
@@ -311,7 +329,9 @@ def process_card(card_id, lock_fd, slug):
             execute(conn, task, workspace, state, lock, stopping, slug)
         except Exception as exc:
             kind = "transient" if isinstance(exc, InterruptedError) else "capability"
-            kb.block_task(conn, card_id, reason=str(exc), kind=kind, expected_run_id=task.current_run_id)
+            request = "environment" if isinstance(exc, EnvironmentActionRequired) else None
+            kb.block_task(conn, card_id, reason=str(exc), kind=kind, request_kind=request,
+                          expected_run_id=task.current_run_id)
 
 
 def serve():

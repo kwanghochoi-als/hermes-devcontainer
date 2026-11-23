@@ -11,6 +11,10 @@ ENGINES = ("codex", "claude")
 LANES = {f"cli:{engine}": engine for engine in ENGINES}
 
 
+class EnvironmentActionRequired(RuntimeError):
+    """This card can resume after the operator restores an external prerequisite."""
+
+
 def board(slug=BOARD):
     if slug == BOARD and not kb.kanban_db_path(board=BOARD).exists():
         kb.create_board(BOARD, name="Project CLI workers")

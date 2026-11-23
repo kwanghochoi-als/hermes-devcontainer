@@ -82,9 +82,12 @@ class BotAPI(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            self.server.messages.put(data["text"][0])
             if "reply_markup" in data:
-                self.server.keyboards.put(json.loads(data["reply_markup"][0]))
+                markup = json.loads(data["reply_markup"][0])
+                self.server.keyboards.put(markup)
+                self.server.buttons[data["text"][0]] = {b["text"]: b["callback_data"]
+                                                       for row in markup["inline_keyboard"] for b in row}
+            self.server.messages.put(data["text"][0])
             result = {"message_id": 10, "date": 1, "chat": CHAT, "text": data["text"][0]}
         else:
             self.send_error(404)
@@ -161,6 +164,7 @@ def exercise():
 
     with ThreadingHTTPServer(("127.0.0.1", 0), BotAPI) as api, ThreadPoolExecutor(max_workers=3) as pool:
         api.messages, api.answers, api.keyboards, api.refuse = Queue(), Queue(), Queue(), False
+        api.buttons = {}
         threading.Thread(target=api.serve_forever, daemon=True).start()
         (home / "config.yaml").write_text(
             "plugins:\n  enabled: [project-cli]\napprovals:\n  timeout: 6\n"
@@ -185,10 +189,12 @@ def exercise():
         for decision, expected in [("ok", "once"), ("no", "deny")]:
             pending = pool.submit(with_native_approval, decision)
             message = api.messages.get(timeout=10)
+            tests.assertTrue(message.startswith("승인 요청"))
             tests.assertIn("printf fixture", message)
             ref = re.search(r"/workok (a[0-9a-f]+)", message)[1]
             payload = api.keyboards.get(timeout=2)["inline_keyboard"][0][decision == "no"]["callback_data"]
             tests.assertEqual(payload, f"hwork:{decision}:{ref}")
+            tests.assertEqual(dispatch("fixed", ref), tg.ACTION_HINT["approval"])
             for foreign in (replace(source, user_id="99"), replace(source, chat_type="group"),
                             replace(source, chat_id="99"), replace(source, is_bot=True)):
                 asyncio.run(receive(payload, foreign))
@@ -211,7 +217,10 @@ def exercise():
 
         pending = pool.submit(clarify_tool, [{"question": "Choose", "choices": ["one", "two"], "multi_select": True},
                                              {"question": "Which file?"}], lambda _: tests.fail("local prompt"))
-        refs = [re.search(r"/workreply (q[0-9a-f]+)", api.messages.get(timeout=10))[1] for _ in range(2)]
+        questions = [api.messages.get(timeout=10) for _ in range(2)]
+        tests.assertTrue(all(q.startswith("자료 요청") and set(api.buttons[q]) == {"보류"} for q in questions))
+        refs = [re.search(r"/workreply (q[0-9a-f]+)", q)[1] for q in questions]
+        tests.assertEqual(dispatch("fixed", refs[1]), tg.ACTION_HINT["materials"])
         asyncio.run(receive(f"/workreply {refs[1]} notes.md", callback=False))
         tests.assertIn("전달", api.messages.get(timeout=3))
         dispatch("reply", refs[0] + " 2,1")
@@ -223,7 +232,8 @@ def exercise():
             tests.assertTrue(api.messages.empty())
             tests.assertIn(f"/workrequest {BOARD} {old_id}", dispatch("status", BOARD))
             tests.assertIn(old_id, dispatch("request", f"{BOARD} {old_id}"))
-            recovered = re.search(r"/workok (k[0-9a-f]+)", api.messages.get(timeout=5))[1]
+            recovered = re.search(r"/workreply (k[0-9a-f]+)", api.messages.get(timeout=5))[1]
+            tests.assertEqual(dispatch("ok", recovered), tg.ACTION_HINT["materials"])
             tests.assertIn("보류", dispatch("no", recovered))
             tests.assertEqual(dispatch("request", f"{BOARD} {old_id}"), tg.STALE)
             tests.assertNotIn(f"/workrequest {BOARD} {old_id}", dispatch("status", BOARD))
@@ -240,7 +250,8 @@ def exercise():
             summary = dispatch("status", BOARD)
             tests.assertIn("마지막 출력 2분 전", summary)
             tests.assertIn("워커 응답", summary)
-            kb.block_task(conn, card, kind="needs_input", reason="Which file?", expected_run_id=before.current_run_id)
+            kb.block_task(conn, card, kind="needs_input", request_kind="materials", reason="Which file?",
+                          expected_run_id=before.current_run_id)
             api.refuse = True
             with tests.assertRaises(Exception):
                 reports.drain(channel, slug, conn)
@@ -248,7 +259,39 @@ def exercise():
             reports.drain(channel, slug, conn)
             msg = api.messages.get(timeout=5)
             tests.assertIn(card, msg)
-            ref = re.search(r"/workok (k[0-9a-f]+)", msg)[1]
+            tests.assertTrue(msg.startswith("자료 요청"))
+            tests.assertNotIn("/workok", msg)
+            tests.assertEqual(set(api.buttons[msg]), {"보류"})
+            ref = re.search(r"/workreply (k[0-9a-f]+)", msg)[1]
+            tests.assertEqual(dispatch("fixed", ref), tg.ACTION_HINT["materials"])
+            tests.assertIn("<답변>", dispatch("reply", ref))
+            # Even the same card ID on another board has its own request and permitted action.
+            peer = "peer-project"
+            kb.create_board(peer, name="운영 프로젝트", project_id="fixture-peer")
+            with kb.scoped_current_board(peer), board(peer) as other:
+                with patch.object(kb, "_new_task_id", return_value=card):
+                    kb.create_task(other, board=peer, title="Worker cannot reach Docker", assignee="cli:codex")
+                kb.block_task(other, card, kind="capability", request_kind="environment", reason="Check docker info")
+                reports.drain(channel, peer, other)
+                notice = api.messages.get(timeout=5)
+                tests.assertIn("환경 조치 요청 · 운영 프로젝트", notice)
+                tests.assertEqual(set(api.buttons[notice]), {"조치 완료 · 재시도", "보류"})
+                env_ref = re.search(r"/workfixed (k[0-9a-f]+)", notice)[1]
+                tests.assertNotEqual(ref, env_ref)
+                tests.assertNotIn("/workok", notice)
+                tests.assertIn("환경 조치 대기", dispatch("status", peer))
+                tests.assertIn("자료 대기", dispatch("status", slug))
+                tests.assertIn("환경 조치 요청", dispatch("request", f"{peer} {card}"))
+                tests.assertIn(env_ref, api.messages.get(timeout=5))
+                asyncio.run(receive(f"hwork:ok:{env_ref}"))
+                tests.assertEqual(api.answers.get(timeout=2), tg.ACTION_HINT["environment"])
+                tests.assertEqual(dispatch("reply", env_ref + " yes"), tg.ACTION_HINT["environment"])
+                tests.assertEqual(kb.get_task(other, card).status, "blocked")
+                asyncio.run(receive(api.buttons[notice]["조치 완료 · 재시도"]))
+                tests.assertIn("재시도", api.answers.get(timeout=2))
+                tests.assertEqual(kb.get_task(other, card).status, "ready")
+                tests.assertEqual(kb.get_task(conn, card).status, "blocked")
+                tests.assertEqual(dispatch("fixed", env_ref), tg.STALE)
             tests.assertIn("보류", dispatch("no", ref))
             tests.assertEqual(kb.get_task(conn, card).status, "blocked")
             tests.assertEqual(dispatch("ok", ref), tg.STALE)
@@ -256,14 +299,14 @@ def exercise():
             kb.unblock_task(conn, card)
             kb.block_task(conn, card, kind="needs_input", reason="Which file now?")
             reports.drain(channel, slug, conn)
-            obsolete = re.search(r"/workok (k[0-9a-f]+)", api.messages.get(timeout=5))[1]
+            obsolete = re.search(r"/workreply (k[0-9a-f]+)", api.messages.get(timeout=5))[1]
             tests.assertEqual(kb.get_task(conn, card).status, "triage")
             kb.specify_triage_task(conn, card)
             kb.claim_task(conn, card, expect_assignee="cli:claude")
             kb.block_task(conn, card, kind="needs_input", reason="Choose final file")
             tests.assertEqual(dispatch("ok", obsolete), tg.STALE)
             reports.drain(channel, slug, conn)
-            ref = re.search(r"/workok (k[0-9a-f]+)", api.messages.get(timeout=5))[1]
+            ref = re.search(r"/workreply (k[0-9a-f]+)", api.messages.get(timeout=5))[1]
             replies = [pool.submit(dispatch, "reply", ref + " verified.md") for _ in range(2)]
             tests.assertEqual(sum(f.result() != tg.STALE for f in replies), 1)
             tests.assertEqual(kb.get_task(conn, card).status, "ready")
@@ -306,11 +349,15 @@ def exercise():
                     slug, card = enqueue(engine, "Prepare the release", project, "same-project-session")
                     fixture = project / ".probe-result.json"
                     proposal = "Deploy the prepared release to production?"
-                    fixture.write_text(json.dumps({"status": "blocked", "summary": proposal}))
+                    fixture.write_text(json.dumps({"status": "blocked", "request_kind": "approval", "summary": proposal}))
                     first_args = execute_card()
                     task = kb.get_task(conn, card)
                     tests.assertEqual((task.status, task.block_kind), ("blocked", "needs_input"))
-                    ref = re.search(r"/workok (k[0-9a-f]+)", api.messages.get(timeout=12))[1]
+                    notice = api.messages.get(timeout=12)
+                    tests.assertTrue(notice.startswith("승인 요청"))
+                    tests.assertEqual(set(api.buttons[notice]), {"승인", "거절"})
+                    tests.assertIn("승인 대기", dispatch("status", BOARD))
+                    ref = re.search(r"/workok (k[0-9a-f]+)", notice)[1]
                     if engine == "codex":
                         dispatch("ok", ref)
                     else:
@@ -332,6 +379,47 @@ def exercise():
                     if engine == "claude":
                         tests.assertIn("Use staging only", resumed_prompt)
                     tests.assertIn("테스트 · fixture", api.messages.get(timeout=12))
+
+                for engine, kind, action, reason in [
+                    ("claude", "materials", "reply", "Which fixture should I use?"),
+                    ("codex", "environment", "fixed", "Restore the host service and check its status"),
+                ]:
+                    slug, card = enqueue(engine, "Run the integration check", project)
+                    fixture.write_text(json.dumps({"status": "blocked", "request_kind": kind, "summary": reason}))
+                    execute_card()
+                    notice = api.messages.get(timeout=12)
+                    ref = re.search(rf"/work{action} (k[0-9a-f]+)", notice)[1]
+                    tests.assertEqual(dispatch("ok", ref), tg.ACTION_HINT[kind])
+                    tests.assertEqual(reports.pending_event(conn, card).payload["request_kind"], kind)
+                    command = f"/work{action} {ref}" + (" fixtures/orders.csv" if action == "reply" else "")
+                    asyncio.run(receive(command, callback=False))
+                    tests.assertIn(card, api.messages.get(timeout=5))
+                    tests.assertEqual(kb.get_task(conn, card).status, "ready")
+                    audit = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='telegram_decided'",
+                                         (card,)).fetchone()
+                    tests.assertEqual(json.loads(audit[0])["request_kind"], kind)
+                    fixture.unlink()
+                    execute_card()
+                    resumed_prompt = (project / ".probe-prompt").read_text()
+                    tests.assertIn(reason, resumed_prompt)
+                    tests.assertIn("fixtures/orders.csv" if action == "reply" else "환경 조치를 완료", resumed_prompt)
+                    tests.assertIn("테스트 · fixture", api.messages.get(timeout=12))
+
+                # The real Docker launcher can require an environment fix before either CLI emits a report.
+                from hermes_cli.workspace_projects import isolation
+                docker = bins / "docker"
+                docker.write_text("#!/bin/sh\necho 'fixture daemon unavailable' >&2\nexit 1\n")
+                docker.chmod(0o755)
+                slug, card = enqueue("codex", "Inspect the checkout", project)
+                with patch("hermes_cli.workspace_projects.worker.isolation", isolation):
+                    execute_card()
+                notice = api.messages.get(timeout=12)
+                tests.assertTrue(notice.startswith("환경 조치 요청"))
+                tests.assertIn("docker info", notice)
+                env_ref = re.search(r"/workfixed (k[0-9a-f]+)", notice)[1]
+                tests.assertIn("보류", dispatch("no", env_ref))
+                tests.assertEqual(kb.get_task(conn, card).status, "blocked")
+                tests.assertEqual(dispatch("fixed", env_ref), tg.STALE)
 
                 slug, card = enqueue("claude", "Check the build", project)
                 for status, title in [("failed", "작업 실행 오류"), ("invalid-report", "반복 실행 오류")]:

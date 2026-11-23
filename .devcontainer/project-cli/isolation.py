@@ -15,7 +15,7 @@ import tomllib
 from hermes_cli import projects_db
 from hermes_constants import get_hermes_home
 
-from .board import project_for_checkout
+from .board import EnvironmentActionRequired, project_for_checkout
 from .layout import BASE, OBSERVER, POLICY_FILES
 
 CONTROLLER = os.environ.get("HERMES_CLI_CONTROLLER", "agent-cli")
@@ -24,9 +24,13 @@ IO = "/run/hermes-job"
 
 
 def docker(*args, check=True):
-    proc = subprocess.run(["docker", *map(str, args)], capture_output=True, text=True, timeout=90)
+    try:
+        proc = subprocess.run(["docker", *map(str, args)], capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise EnvironmentActionRequired("devcontainer에서 docker info로 Docker CLI와 데몬 연결을 확인하세요.") from exc
     if check and proc.returncode:
-        raise RuntimeError(f"Docker {args[0]} 실행 실패 · {proc.stderr.strip()[:500]}")
+        raise EnvironmentActionRequired(f"Docker {args[0]} 실행 실패 · {proc.stderr.strip()[:500]}\n"
+                                        "devcontainer에서 docker info와 오류에 표시된 대상을 확인하세요.")
     return proc
 
 
@@ -45,7 +49,7 @@ def reap_checkout(cwd):
 def toolchain(engine):
     binary = shutil.which(engine)
     if not binary:
-        raise RuntimeError(f"{engine} 실행 파일이 없습니다.")
+        raise EnvironmentActionRequired(f"devcontainer에 {engine} CLI를 설치하고 {engine} --version으로 확인하세요.")
     source = Path(binary).resolve(strict=True)
     vendor = None
     if engine == "codex" and source.suffix == ".js":
@@ -53,7 +57,7 @@ def toolchain(engine):
         vendors = [*package.glob("node_modules/@openai/codex-*/vendor/*/bin/codex"),
                    *package.glob("vendor/*/bin/codex")]
         if len(vendors) != 1:
-            raise RuntimeError("설치된 Codex 플랫폼 바이너리를 확인하세요.")
+            raise EnvironmentActionRequired("devcontainer의 Codex 설치를 복구하고 codex --version으로 확인하세요.")
         source = vendors[0]
         vendor = source.parents[1]
     stamp = hashlib.sha256(f"{source}/{source.stat().st_size}/{source.stat().st_mtime_ns}".encode()).hexdigest()[:16]
@@ -104,7 +108,7 @@ class Mounts:
                 csv.writer(buf, lineterminator="").writerow(fields)
                 self.args.extend(["--mount", buf.getvalue()])
                 return
-        raise ValueError(f"Docker에 연결된 경로가 필요합니다 · {path}")
+        raise EnvironmentActionRequired(f"devcontainer의 Docker 마운트 설정에서 이 경로의 연결을 확인하세요 · {path}")
 
 
 def checkout_mounts(mounts, cwd, state):
@@ -214,6 +218,9 @@ def launch(engine, cli, cwd, project, files, prompt_text, lock, session, observe
             mounts.add(OBSERVER / ".codex/hooks.json", "/etc/codex/hooks.json")
             mounts.add(OBSERVER / ".codex/requirements.toml", "/etc/codex/requirements.toml")
         authdir = Path.home() / ".hermes/git-auth"
+        if not all((authdir / name).is_file() for name in ("pharmmate.token", "pharmmate.gitconfig")):
+            raise EnvironmentActionRequired("devcontainer에서 hermes project-cli git-auth setup으로 Git 읽기 인증을 "
+                                            "등록한 뒤 hermes project-cli git-auth status로 확인하세요.")
         mounts.add(authdir / "pharmmate.token", IO + "/pharmmate.token")
         mounts.add(authdir / "pharmmate.gitconfig", IO + "/gitconfig")
         mounts.add(BASE / "project-cli/git_auth.py")

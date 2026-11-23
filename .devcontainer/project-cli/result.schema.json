@@ -4,7 +4,12 @@
     "status": {
       "type": "string",
       "enum": ["completed", "blocked", "failed"],
-      "description": "Use blocked when an operator must decide or authorize the next action. Use failed for a technical obstacle that persists after safe recovery."
+      "description": "Use blocked when the operator must approve a proposal, provide missing material or fix an environment prerequisite. Use failed for other persistent technical errors."
+    },
+    "request_kind": {
+      "type": "string",
+      "enum": ["none", "approval", "materials", "environment"],
+      "description": "For blocked, use approval for a yes/no authorization, materials for missing information, a file or a choice, or environment for a concrete operator-side fix. Use none for completed and failed."
     },
     "summary": { "type": "string", "description": "Changes and evidence, or the specific blocker" },
     "tests": { "type": "string", "description": "Commands actually run and their outcomes, or why none ran" },
@@ -22,6 +27,6 @@
       }
     }
   },
-  "required": ["status", "summary", "tests", "knowledge"],
+  "required": ["status", "request_kind", "summary", "tests", "knowledge"],
   "additionalProperties": false
 }

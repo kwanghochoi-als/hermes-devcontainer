@@ -1,0 +1,41 @@
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -3125,6 +3125,6 @@
+ def block_task(
+     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
+-    kind: Optional[str] = None, expected_run_id: Optional[int] = None,
++    kind: Optional[str] = None, expected_run_id: Optional[int] = None, request_kind: Optional[str] = None,
+ ) -> bool:
+     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
+     :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
+@@ -3142,6 +3142,9 @@
+     """
+     if kind is not None and kind not in VALID_BLOCK_KINDS:
+         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
++    if request_kind is not None and request_kind not in ("approval", "materials", "environment"):
++        raise ValueError("Unknown operator request kind")
++    request = {"request_kind": request_kind} if request_kind else {}
+     with write_txn(conn):
+         cur_row = conn.execute(
+             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
+@@ -3167,7 +3170,7 @@
+             if classified != 1:
+                 return False
+             _append_event(conn, task_id, "blocked", {
+-                "kind": kind, "reason": reason, "classified_in_place": True,
++                "kind": kind, "reason": reason, "classified_in_place": True, **request,
+             })
+             return True
+         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
+@@ -3204,9 +3207,9 @@
+         if conn.execute(sql, params).rowcount != 1:
+             return False
+         run_id = _end_or_synthesize_run(
+-            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
++            conn, task_id, outcome="blocked", status="blocked", summary=reason, metadata=request or None, synthesize=bool(reason),
+         )
+-        _append_event(conn, task_id, event_kind, payload, run_id=run_id)
++        _append_event(conn, task_id, event_kind, {**payload, **request}, run_id=run_id)
+         blocked_task = get_task(conn, task_id)
+     _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
+     return True

@@ -25,7 +25,17 @@ from hermes_constants import get_hermes_home
 
 TRANSPORT = "project-telegram"
 STALE = "이미 처리됐거나 만료된 요청입니다."
-OPERATOR_COMMANDS = {"workok", "workno", "workreply", "workstatus", "workrequest"}
+OPERATOR_COMMANDS = {"workok", "workno", "workreply", "workfixed", "workstatus", "workrequest"}
+REQUEST_ACTIONS = {
+    "approval": {"ok": "승인", "no": "거절"},
+    "materials": {"reply": None, "no": "보류"},
+    "environment": {"fixed": "조치 완료 · 재시도", "no": "보류"},
+}
+ACTION_HINT = {
+    "approval": "승인을 기다리고 있습니다. /workok <ID>로 승인하거나 /workno <ID>로 거절하세요.",
+    "materials": "자료를 기다리고 있습니다. /workreply <ID> <자료·경로·답변>으로 전달하세요.",
+    "environment": "환경 조치 대기 중입니다. 안내된 조치를 마친 뒤 /workfixed <ID>로 재시도하세요.",
+}
 LOCAL_SURFACES = {"", "cli", "local", "tui", "desktop", "gui", "acp", "kanban"}
 
 
@@ -120,15 +130,15 @@ def bot_client(token):
     return _telegram_bot(token, config.extra if config else None)
 
 
-async def _send(channel, message, decision_ref):
+async def _send(channel, message, decision_ref, kind):
     from plugins.platforms.telegram.standalone import _send_telegram_message_with_retry
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     # Plain text and disabled link previews, including for text supplied by a worker.
     keyboard = None
     if decision_ref:
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("승인", callback_data=f"hwork:ok:{decision_ref}"),
-            InlineKeyboardButton("거절", callback_data=f"hwork:no:{decision_ref}"),
+            InlineKeyboardButton(label, callback_data=f"hwork:{action}:{decision_ref}")
+            for action, label in REQUEST_ACTIONS[kind].items() if label
         ]])
     async with bot_client(channel.token) as bot:
         # Each code point can occupy two UTF-16 units. Keep even emoji-heavy commands intact.
@@ -138,11 +148,11 @@ async def _send(channel, message, decision_ref):
                                                     disable_web_page_preview=True, reply_markup=keyboard if final else None)
 
 
-def send(channel, message, decision_ref=None):
+def send(channel, message, decision_ref=None, *, kind=None):
     with store(channel.path) as conn:
         if not conn.execute("SELECT 1 FROM binding WHERE generation=?", (channel.key,)).fetchone():
             raise RuntimeError("Telegram 운영자 연결이 변경됐습니다.")
-    asyncio.run(_send(channel, message, decision_ref))
+    asyncio.run(_send(channel, message, decision_ref, kind))
 
 
 async def verify_dm(token, owner):
@@ -233,14 +243,14 @@ def wire(application, adapter):
         result = await asyncio.to_thread(command, action, raw, channel)
         if query:
             await query.answer(result[:180], show_alert=True)
-            if result != STALE and query.message and query.message.text:
+            if result != STALE and result not in ACTION_HINT.values() and query.message and query.message.text:
                 await query.edit_message_text(f"{query.message.text}\n\n{result[:180]}",
                                               reply_markup=None, disable_web_page_preview=True)
         else:
             for pos in range(0, len(result), 1800):
                 await update.message.reply_text(result[pos:pos + 1800])
 
-    application.add_handler(CallbackQueryHandler(receive, pattern=r"^hwork:(?:ok|no):[akq][a-f0-9]{16}$"))
+    application.add_handler(CallbackQueryHandler(receive, pattern=r"^hwork:(?:ok|no|fixed):[akq][a-f0-9]{16}$"))
     application.add_handler(CommandHandler(sorted(OPERATOR_COMMANDS), receive, filters=filters.UpdateType.MESSAGE))
     if route():
         threading.Thread(target=copy_context().run, args=(watch,), name="telegram-kanban", daemon=True).start()
@@ -272,17 +282,21 @@ def command(action, raw, channel):
             return STALE
         if row["kind"] == "card":
             from .telegram_kanban import decide
-            response = decide(row, action, parts[1] if len(parts) > 1 else "")
-            conn.execute("DELETE FROM requests WHERE ref=?", (ref,))
+            response, closed = decide(row, action, parts[1] if len(parts) > 1 else "")
+            if closed:
+                conn.execute("DELETE FROM requests WHERE ref=?", (ref,))
             return response
         waiter = row["waiter"]
         if not waiter or process_identity(waiter.split("/")[0]) != waiter:
             return STALE
-        if (row["kind"] == "approval" and action == "reply") or (row["kind"] == "question" and action == "ok"):
-            return "요청 메시지에 표시된 명령을 사용하세요."
+        kind = "materials" if row["kind"] == "question" else row["kind"]
+        if kind not in REQUEST_ACTIONS:
+            return STALE
+        if action not in REQUEST_ACTIONS[kind]:
+            return ACTION_HINT[kind]
         value = parts[1] if action == "reply" else ""
         conn.execute("UPDATE requests SET response=? WHERE ref=?", (json.dumps([action, value]), ref))
-        return {"ok": "이번 요청을 한 번 승인했습니다.", "no": "요청을 거절했습니다.",
+        return {"ok": "이번 요청을 한 번 승인했습니다.", "no": "요청을 거절했습니다." if kind == "approval" else "질문을 보류했습니다.",
                 "reply": "원래 세션에 답변을 전달했습니다."}[action]
 
 
@@ -354,8 +368,9 @@ def local_notice(kind, platform, session_id="", **kwargs):
     # Sudo and tools whose host approval policy requires the original UI still notify the operator.
     if kind not in ("sudo", "approval") or getattr(_presenting, "request_id", None):
         return
-    label = "sudo 비밀번호 입력" if kind == "sudo" else "원래 세션에서의 승인"
-    text = f"Hermes · {project}\n{label}이 필요합니다. 원래 작업 화면을 열어 확인하세요."
+    title = "환경 조치 요청" if kind == "sudo" else "승인 요청"
+    instruction = "원래 작업 화면에서 sudo 비밀번호를 입력하세요." if kind == "sudo" else "원래 작업 화면에서 명령을 확인하고 승인 여부를 선택하세요."
+    text = f"{title} · Hermes · {project}\n{instruction}"
 
     def deliver():
         try:
@@ -399,13 +414,13 @@ def present(req):
         return req.respond("deny")
     channel, project, ref = origin
     expires = time.time() + req.timeout_seconds
-    text = (f"Hermes 명령 승인 · {project or req.surface}\n{req.description}\n\n{req.command}\n\n"
+    text = (f"승인 요청 · Hermes 명령 · {project or req.surface}\n{req.description}\n\n{req.command}\n\n"
             f"{req.timeout_seconds:g}초 이내에 선택하세요.\n/workok {ref}\n/workno {ref}")
     try:
         request(channel, "approval", ref, expires)
         if _approval_origins.get(req.request_id) is not origin:
             return req.respond("deny")
-        send(channel, text, ref)
+        send(channel, text, ref, kind="approval")
         action, _ = wait_reply(channel, ref, expires)
         return req.respond("once" if action == "ok" else "deny")
     finally:
@@ -432,12 +447,12 @@ def ask(channel, questions):
             request(channel, "question", ref, expires)
             refs.append(ref)
             choices = question["choices_offered"] or []
-            text = [f"Hermes 질문 · {project_label() or '로컬 세션'}", clean(question["question"])]
+            text = [f"자료 요청 · Hermes · {project_label() or '로컬 세션'}", clean(question["question"])]
             text += [f"{i}. {clean(choice)}" for i, choice in enumerate(choices, 1)]
             text += ["", f"/workreply {ref} <답변>", f"/workno {ref}"]
             if question["multi_select"]:
                 text.append("여러 선택은 번호를 쉼표로 구분하세요.")
-            send(channel, "\n".join(text))
+            send(channel, "\n".join(text), ref, kind="materials")
         for ref, question in zip(refs, questions):
             action, value = wait_reply(channel, ref, expires)
             if action != "reply":

@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 REPORTS = {"completed": "작업 완료", "blocked": "사람의 확인 필요", "review_requested": "검토 요청",
            "block_loop_detected": "반복 차단", "crashed": "워커 중단", "gave_up": "재시도 종료",
            "timed_out": "실행 시간 초과"}
+REQUEST_LABELS = {"approval": ("승인 요청", "승인 대기"), "materials": ("자료 요청", "자료 대기"),
+                  "environment": ("환경 조치 요청", "환경 조치 대기")}
 
 
 def pending_status(conn, card, event):
@@ -37,8 +39,15 @@ def pending_event(conn, card):
     return None
 
 
-def technical_block(assignee, kind):
-    return assignee in LANES and kind in ("transient", "capability")
+def request_kind(assignee, event):
+    detail = event.payload or {}
+    declared = detail.get("request_kind")
+    if declared in REQUEST_LABELS:
+        return declared
+    if assignee in LANES and detail.get("kind") in ("transient", "capability"):
+        return None
+    # An older or native block carries no specific proposal authorizing a one-tap approval.
+    return "materials"
 
 
 def work_status(selected=""):
@@ -50,7 +59,7 @@ def work_status(selected=""):
         for slug, conn in boards.items():
             if selected and slug != selected:
                 continue
-            rows = conn.execute("SELECT id,title,status,assignee,block_kind,current_run_id,last_heartbeat_at FROM tasks "
+            rows = conn.execute("SELECT id,title,status,assignee,current_run_id,last_heartbeat_at FROM tasks "
                                 "WHERE status NOT IN ('done','archived','cancelled') ORDER BY created_at,id").fetchall()
             counts = {}
             details = []
@@ -61,11 +70,11 @@ def work_status(selected=""):
                 hint = ""
                 if state in ("blocked", "triage"):
                     event = pending_event(conn, card)
-                    if technical_block(row["assignee"], row["block_kind"]):
-                        label = "실행 오류"
-                    elif event:
-                        label = "승인 대기"
-                        hint = f" · /workrequest {slug} {card}"
+                    if event:
+                        kind = request_kind(row["assignee"], event)
+                        label = REQUEST_LABELS[kind][1] if kind else "실행 오류"
+                        if kind:
+                            hint = f" · /workrequest {slug} {card}"
                     elif state == "blocked":
                         label = "보류"
                 if state == "running" and row["assignee"] in LANES:
@@ -99,39 +108,48 @@ def reissue(channel, parts):
         if not event:
             return tg.STALE
         task = kb.get_task(conn, card)
-        if not task or technical_block(task.assignee, (event.payload or {}).get("kind")):
+        kind = request_kind(task.assignee, event) if task else None
+        if not kind:
             return tg.STALE
         if not publish(channel, slug, conn, event):
             return tg.STALE
-        return f"{slug} · {card} 승인 요청을 다시 표시했습니다."
+        return f"{slug} · {card} · {REQUEST_LABELS[kind][0]}을 다시 표시했습니다."
 
 
 def decide(row, action, reply):
-    slug, card, event = row["board"], row["card"], row["event"]
+    slug, card = row["board"], row["card"]
     if kb.read_board_metadata(slug).get("archived") or not kb.kanban_db_path(board=slug).is_file():
-        return tg.STALE
+        return tg.STALE, True
     with kb.scoped_current_board(slug), board(slug) as conn, kb.write_txn(conn):
-        state = pending_status(conn, card, event)
-        if not state:
-            return tg.STALE
-        message = {"ok": "제시된 내용으로 이 카드를 재개하도록 승인했습니다.",
-                   "no": "이 요청을 거절했습니다. 카드를 보류합니다.",
-                   "reply": f"다음 답변으로 이 카드를 재개합니다.\n{reply}"}[action]
-        proposal = conn.execute("SELECT json_extract(payload, '$.reason') FROM task_events WHERE task_id=? AND id=?",
-                                (card, event)).fetchone()[0]
+        event = pending_event(conn, card)
+        if not event or event.id != row["event"]:
+            return tg.STALE, True
+        task = kb.get_task(conn, card)
+        kind = request_kind(task.assignee, event)
+        if not kind:
+            return tg.STALE, True
+        scoped_reply = kind == "approval" and action == "reply"
+        if action not in tg.REQUEST_ACTIONS[kind] and not scoped_reply:
+            return tg.ACTION_HINT[kind], False
+        message = {"ok": "제시된 작업을 승인했습니다. 카드를 재개합니다.",
+                   "no": "요청을 거절하고 카드를 보류합니다." if kind == "approval" else "요청과 카드를 보류합니다.",
+                   "reply": ("운영자가 지정한 범위로 작업을 재개합니다." if scoped_reply else "제공한 자료·답변으로 카드를 재개합니다.") + f"\n{reply}",
+                   "fixed": "운영자가 환경 조치를 완료했습니다. 실행 환경을 다시 확인하고 같은 카드를 재시도합니다."}[action]
+        proposal = (event.payload or {}).get("reason")
         if proposal:
-            message += f"\n결정 대상 · {tg.clean(proposal)}"
+            label = {"approval": "결정 대상", "materials": "요청 자료", "environment": "확인할 환경"}[kind]
+            message += f"\n{label} · {tg.clean(proposal)}"
         kb.add_comment(conn, card, "Telegram 운영자", message)
         if action != "no":
-            if state == "triage":
+            if task.status == "triage":
                 # Only a delivered block_loop_detected reaches this branch. Re-gate on parents.
                 landing = kb._landing_status_after_parents(conn, card)
                 conn.execute("UPDATE tasks SET status=? WHERE id=?", (landing, card))
-                kb._append_event(conn, card, "specified", {"source": "telegram", "block_event": event})
+                kb._append_event(conn, card, "specified", {"source": "telegram", "block_event": event.id})
             elif not kb.unblock_task(conn, card, allow_nested=True):
                 raise RuntimeError("카드 상태가 변경되어 결정을 반영할 수 없습니다.")
-        kb._append_event(conn, card, "telegram_decided", {"block_event": event, "decision": action})
-    return f"{slug} · {card}\n{message.splitlines()[0]}"
+        kb._append_event(conn, card, "telegram_decided", {"block_event": event.id, "request_kind": kind, "decision": action})
+    return f"{slug} · {card}\n{message.splitlines()[0]}", True
 
 
 def publish(channel, slug, kanban, event):
@@ -139,12 +157,18 @@ def publish(channel, slug, kanban, event):
     if task is None:
         return
     detail = event.payload or {}
-    project = Path(task.workspace_path).name if task.workspace_path else slug
-    needs_decision = event.kind in ("blocked", "block_loop_detected")
+    project = (kb.read_board_metadata(slug).get("name") if slug != BOARD else None) or (
+        Path(task.workspace_path).name if task.workspace_path else slug)
+    kind = None
     title = REPORTS[event.kind]
-    if needs_decision and technical_block(task.assignee, detail.get("kind")):
-        needs_decision = False
-        title = "작업 실행 오류" if event.kind == "blocked" else "반복 실행 오류"
+    if event.kind in ("blocked", "block_loop_detected"):
+        kind = request_kind(task.assignee, event)
+        if kind:
+            title = REQUEST_LABELS[kind][0]
+            if event.kind == "block_loop_detected":
+                title += " · 반복 차단"
+        else:
+            title = "작업 실행 오류" if event.kind == "blocked" else "반복 실행 오류"
     header = f"{title} · {project} · {task.assignee or 'Hermes'}\n보드 {slug} · 카드 {task.id}"
     reason = detail.get("reason") or detail.get("summary") or detail.get("error") or ""
     if event.kind == "completed":
@@ -152,18 +176,23 @@ def publish(channel, slug, kanban, event):
                              (task.id, event.run_id)).fetchone()
         reason = (run[0] if run else "") or reason or task.result
     reason = tg.clean(reason)
-    message = f"{tg.clean(header)}\n{tg.clean(task.title)[:180]}\n\n{reason if needs_decision else reason[:2800]}".strip()
+    message = f"{tg.clean(header)}\n{tg.clean(task.title)[:180]}\n\n{reason if kind else reason[:2800]}".strip()
     ref = None
-    if needs_decision:
+    if kind:
         if not pending_status(kanban, task.id, event.id):
             return
         ref = "k" + hashlib.blake2s(f"{channel.key}/{slug}/{task.id}/{event.id}".encode(), digest_size=8).hexdigest()
         with tg.store(channel.path) as conn:
             conn.execute("INSERT OR IGNORE INTO requests(ref,route,kind,board,card,event) VALUES (?,?,'card',?,?,?)",
                          (ref, channel.key, slug, task.id, event.id))
-        message += (f"\n\n카드 재개 승인 · /workok {ref}\n보류 · /workno {ref}"
-                    f"\n답변 후 재개 · /workreply {ref} <답변>")
-    tg.send(channel, message, ref)
+        instructions = {
+            "approval": f"제안 승인 · /workok {ref}\n범위를 지정해 재개 · /workreply {ref} <지시>\n거절 · /workno {ref}",
+            "materials": f"자료·경로 또는 답변 전달 · /workreply {ref} <답변>\n보류 · /workno {ref}",
+            "environment": ("devcontainer 또는 호스트에서 안내된 조치를 마친 뒤 재시도하세요. "
+                            f"인증 정보는 로컬에서 입력하세요.\n조치 완료 · /workfixed {ref}\n보류 · /workno {ref}"),
+        }
+        message += "\n\n" + instructions[kind]
+    tg.send(channel, message, ref, kind=kind)
     return True
 
 
