@@ -1,25 +1,13 @@
---- a/hermes_cli/kanban_db.py
-+++ b/hermes_cli/kanban_db.py
-@@ -3557,8 +3557,9 @@
--def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-+def unblock_task(conn: sqlite3.Connection, task_id: str, *, allow_nested: bool = False) -> bool:
-     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-     when that is where it left off), closing any leaked run first."""
-     now = int(time.time())
--    with write_txn(conn):
-+    # This transition has no post-commit callbacks. An operator reply and unblock can share one commit.
-+    with write_txn(conn, allow_nested=allow_nested):
-         resume_status = (
-             _resume_status_from_events(conn, task_id)
-             if _task_status(conn, task_id) == "blocked"
 --- a/tools/clarify_tool.py
 +++ b/tools/clarify_tool.py
-@@ -118,6 +118,8 @@ def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
+@@ -118,6 +118,10 @@
      normalized, error = _normalize_questions(questions)
      if error:
          return tool_error(error)
-+    from hermes_cli.workspace_projects.telegram import clarify_callback
-+    callback = clarify_callback(callback)
++    from hermes_cli.workspace_plugin import extension
++    telegram = extension("telegram", required=False)
++    if telegram is not None:
++        callback = telegram.clarify_callback(callback)
      if callback is None:
          return tool_error(_UNAVAILABLE)
      from agent.redact import redact_approval_display

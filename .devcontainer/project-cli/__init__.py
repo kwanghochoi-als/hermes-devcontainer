@@ -64,6 +64,11 @@ def setup_cli(parser):
     submit.add_argument("--session", help="Originating Hermes session ID for follow-up tasks")
     submit.add_argument("--parent", action="append", default=[], help="Upstream Kanban card ID (repeatable)")
     commands.add_parser("board", help="Print the current project's Kanban board")
+    log = commands.add_parser("log", help="Read the sanitized log for a CLI attempt")
+    log.add_argument("card")
+    log.add_argument("--board", help="Kanban board (default: current project)")
+    log.add_argument("--run", type=int, help="Run ID (default: latest)")
+    log.add_argument("--tail", type=int, help="Maximum bytes per log stream")
     commands.add_parser("knowledge", help="Print the QMD collection for findings in the current project")
     scope = commands.add_parser("search-scope", help="Print the collections for a QMD search")
     scope.add_argument("--all-projects", action="store_true")
@@ -119,6 +124,14 @@ def cli(args):
         print("\n".join(search_scope(Path.cwd(), all_projects=args.all_projects)))
     elif args.action == "board":
         print(board_for_checkout(project_dir(Path.cwd())))
+    elif args.action == "log":
+        from .attempts import format_log
+        from .board import board
+        try:
+            with board(args.board or board_for_checkout(project_dir(Path.cwd()))) as conn:
+                print(format_log(conn, args.card, args.run, args.tail))
+        except (ValueError, OSError, LookupError) as exc:
+            raise SystemExit(str(exc)) from None
     else:
         _, card = enqueue(args.agent, args.prompt, Path.cwd(), args.session, parents=args.parent)
         print(card)
@@ -149,13 +162,16 @@ def project_tool_policy(tool_name="", args=None, session_id="", **kwargs):
 
 def register(ctx):
     from . import telegram
+    locales = json.loads(Path(__file__).with_name("desktop-locales.json").read_text())
+    for language, messages in locales.items():
+        ctx.register_locale(language, messages, surface="desktop")
     ctx.register_hook("pre_tool_call", project_tool_policy)
     ctx.register_approval_transport(telegram.TRANSPORT, telegram.present)
     ctx.register_hook("pre_approval_request", telegram.approval_started)
     ctx.register_hook("post_approval_response", telegram.approval_finished)
     ctx.register_hook("on_human_input_request", telegram.local_notice)
     ctx.register_hook("on_session_end", telegram.turn_finished)
-    ctx.register_telegram_handler(telegram.wire)
+    ctx.register_platform_handler("telegram", telegram.wire)
     for engine in ENGINES:
         def command(raw_args, *, session_id="", platform="", _engine=engine):
             return slash(_engine, raw_args, session_id, platform)

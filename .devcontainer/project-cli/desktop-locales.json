@@ -1,0 +1,34 @@
+{
+  "ar": {
+    "sidebar.projects.deleteOwnedConfirm": "هل تريد حذف هذا المشروع ولوحة كانبان الخاصة به وجلساته ومعارفه المفهرسة نهائيًا؟ ستُحفظ ملفات المصدر ومستودعات Git وأشجار العمل."
+  },
+  "de": {
+    "sidebar.projects.deleteOwnedConfirm": "Dieses Projekt mit seinem Kanban-Board, seinen Sitzungen und seinem indexierten Wissen endgültig löschen? Quelldateien, Git-Repositories und Worktrees bleiben erhalten."
+  },
+  "en": {
+    "sidebar.projects.deleteOwnedConfirm": "Permanently delete this project, its dedicated Kanban board, sessions, and indexed knowledge? Your source files, Git repositories, and worktrees will be kept.",
+    "sidebar.projects.menuDelete": "Delete project"
+  },
+  "es": {
+    "sidebar.projects.deleteOwnedConfirm": "¿Eliminar permanentemente este proyecto, su tablero Kanban, sus sesiones y su conocimiento indexado? Se conservarán los archivos fuente, los repositorios Git y los árboles de trabajo."
+  },
+  "fr": {
+    "sidebar.projects.deleteOwnedConfirm": "Supprimer définitivement ce projet, son tableau Kanban, ses sessions et ses connaissances indexées ? Les fichiers sources, les dépôts Git et les arbres de travail seront conservés."
+  },
+  "ja": {
+    "sidebar.projects.deleteOwnedConfirm": "このプロジェクトと専用のカンバンボード、セッション、索引付けされたナレッジを完全に削除しますか？ ソースファイル、Git リポジトリ、ワークツリーは保持されます。"
+  },
+  "ko": {
+    "sidebar.projects.deleteOwnedConfirm": "프로젝트와 전용 칸반 보드, 세션, 색인된 지식을 영구 삭제할까요? 소스 파일, Git 저장소, worktree는 보존합니다.",
+    "sidebar.projects.menuDelete": "프로젝트 삭제"
+  },
+  "ru": {
+    "sidebar.projects.deleteOwnedConfirm": "Удалить навсегда этот проект, его канбан-доску, сеансы и проиндексированные знания? Исходные файлы, репозитории Git и рабочие деревья сохранятся."
+  },
+  "zh": {
+    "sidebar.projects.deleteOwnedConfirm": "永久删除此项目及其专用看板、会话和已索引的知识？源文件、Git 仓库和工作树将保留。"
+  },
+  "zh-hant": {
+    "sidebar.projects.deleteOwnedConfirm": "永久刪除此專案及其專用看板、對話和已索引的知識？原始檔案、Git 儲存庫和工作樹將會保留。"
+  }
+}

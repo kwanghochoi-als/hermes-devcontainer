@@ -213,6 +213,7 @@ def wire(application, adapter):
     """Receive authenticated Telegram updates directly, even while the DM's agent is waiting."""
     from gateway.config import Platform
     from gateway.session import SessionSource
+    from gateway.slash_access import policy_for_runner_source
     from telegram.ext import CallbackQueryHandler, CommandHandler, filters
     from .telegram_kanban import watch
 
@@ -235,7 +236,7 @@ def wire(application, adapter):
                      and adapter._is_callback_user_authorized(src.user_id, chat_id=src.chat_id, chat_type=src.chat_type))
         runner = getattr(adapter, "gateway_runner", None)
         if permitted and runner:
-            permitted = runner._check_slash_access(src, "work" + action) is None
+            permitted = policy_for_runner_source(runner, src).can_run(src.user_id, "work" + action)
         if not permitted:
             if query:
                 await query.answer("등록된 운영자의 개인 대화에서 사용할 수 있습니다.", show_alert=True)

@@ -24,7 +24,7 @@ from urllib.parse import parse_qs
 
 class OperatorTelegram(unittest.TestCase):
     def test_operator_dm(self):
-        root = Path.home() / ".hermes/hermes-agent"
+        root = Path(os.environ.get("HERMES_TEST_INSTALL", Path.home() / ".hermes/hermes-agent"))
         sys.path.insert(0, str(root))
         try:
             from hermes_cli._launchers import runtime_command
@@ -34,11 +34,12 @@ class OperatorTelegram(unittest.TestCase):
             home = Path(tmp) / "home"
             (home / "plugins").mkdir(parents=True)
             (home / "plugins/project-cli").symlink_to(Path(__file__).resolve().parents[1] / "project-cli")
+            (home / "config.yaml").write_text("plugins:\n  enabled: [project-cli]\n")
             projects = Path(tmp) / "projects"
             projects.mkdir()
             env = dict(os.environ, HERMES_KANBAN_HOME=str(home),
                        HERMES_DASHBOARD_FILES_ROOT=str(projects))
-            env.pop("HERMES_HOME", None)
+            env["HERMES_HOME"] = str(root.parent)
             env.pop("HERMES_KANBAN_DB", None)
             for key in list(env):
                 if key.startswith("TELEGRAM_"):
@@ -106,8 +107,10 @@ def exercise():
     from hermes_cli import kanban_db as kb
     from hermes_cli.lifecycle import invoke_hook
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
-    from hermes_cli.workspace_projects import telegram as tg, telegram_kanban as reports
-    from hermes_cli.workspace_projects.board import BOARD, board, enqueue
+    from hermes_cli.workspace_plugin import extension
+    tg, reports = extension("telegram"), extension("telegram_kanban")
+    boards = extension("board")
+    BOARD, board, enqueue = boards.BOARD, boards.board, boards.enqueue
     from tools.approval_context import set_current_observability_context, reset_current_observability_context
     from tools.approval_prompt import _present_with_selected_transport
     from tools.clarify_tool import clarify_tool
@@ -135,7 +138,7 @@ def exercise():
             app = Application.builder().bot(bot).updater(None).build()
             adapter = Mock()
             adapter._is_callback_user_authorized.return_value = True
-            adapter.gateway_runner._check_slash_access.return_value = None
+            adapter.gateway_runner = SimpleNamespace(config=SimpleNamespace(platforms={}))
             with patch("threading.Thread.start"):
                 wire(app, adapter)
             user = {"id": int(src.user_id), "is_bot": src.is_bot, "first_name": "Fixture"}
@@ -310,7 +313,8 @@ def exercise():
             replies = [pool.submit(dispatch, "reply", ref + " verified.md") for _ in range(2)]
             tests.assertEqual(sum(f.result() != tg.STALE for f in replies), 1)
             tests.assertEqual(kb.get_task(conn, card).status, "ready")
-            from hermes_cli.workspace_projects.worker import task_context
+            worker = extension("worker")
+            task_context = worker.task_context
             tests.assertIn("verified.md", task_context(conn, kb.get_task(conn, card)))
             kb.claim_task(conn, card, expect_assignee="cli:claude")
             kb.complete_task(conn, card, result="Done", summary="Done\n테스트 · fixture passed")
@@ -321,7 +325,7 @@ def exercise():
 
             # Run the unmodified worker entry point with fixture CLIs. Check that each engine
             # sees the operator comment and resumes the very same native CLI session.
-            from hermes_cli.workspace_projects.worker import digest, process_card
+            digest, process_card = worker.digest, worker.process_card
             bins = home / "fixture-bin"
             bins.mkdir()
             fake_cli = runpy.run_path(str(Path(__file__).with_name("test_cli_workers.py")))["FAKE_CLI"]
@@ -339,7 +343,7 @@ def exercise():
             spec = importlib.util.spec_from_file_location("fixture_transport", Path(__file__).with_name("fixture_transport.py"))
             fixture_transport = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(fixture_transport)
-            with patch("hermes_cli.workspace_projects.worker.isolation", fixture_transport), patch.dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}"):
+            with patch.object(worker, "isolation", fixture_transport), patch.dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}"):
                 # The connected gateway owns this independent notifier, including when both CLIs are busy.
                 wire(Application.builder().bot(tg.bot_client(channel.token)).updater(None).build(), Mock())
                 for engine in ("codex", "claude"):
@@ -406,12 +410,12 @@ def exercise():
                     tests.assertIn("테스트 · fixture", api.messages.get(timeout=12))
 
                 # The real Docker launcher can require an environment fix before either CLI emits a report.
-                from hermes_cli.workspace_projects import isolation
+                isolation = extension("isolation")
                 docker = bins / "docker"
                 docker.write_text("#!/bin/sh\necho 'fixture daemon unavailable' >&2\nexit 1\n")
                 docker.chmod(0o755)
                 slug, card = enqueue("codex", "Inspect the checkout", project)
-                with patch("hermes_cli.workspace_projects.worker.isolation", isolation):
+                with patch.object(worker, "isolation", isolation):
                     execute_card()
                 notice = api.messages.get(timeout=12)
                 tests.assertTrue(notice.startswith("환경 조치 요청"))

@@ -5,9 +5,11 @@ from dataclasses import replace
 import fcntl
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -99,18 +101,22 @@ class Events:
         self.error = ""
 
     def read(self, stream, finished):
+        diagnostics = []
         while True:
             offset = stream.tell()
             line = stream.readline()
             if not line:
-                return
+                return "\n".join(diagnostics)
             if not finished and not line.endswith(b"\n"):
                 stream.seek(offset)
-                return
+                return "\n".join(diagnostics)
             try:
                 event = json.loads(line)
             except (ValueError, UnicodeError):
                 continue
+            if not isinstance(event, dict):
+                continue
+            diagnostics.extend(attempts.event_lines(event))
             kind = event.get("type")
             if kind == "thread.started" or (kind == "system" and event.get("subtype") == "init"):
                 value = str(UUID(event.get("thread_id") or event["session_id"]))
@@ -146,7 +152,7 @@ def task_context(conn, task, attachments=None):
     # cli:codex and cli:claude are shared across otherwise independent projects.
     now = int(time.time())
     lines = [f"Kanban card {task.id} in {task.workspace_path}", task.body or task.title, ""]
-    context_sections._ctx_attachments(lines, kb.list_attachments(conn, task.id) if attachments is None else attachments)
+    context_sections._ctx_attachments(lines, attempts.input_attachments(conn, task.id) if attachments is None else attachments)
     context_sections._ctx_prior_attempts(lines, conn, task.id, now)
     context_sections._ctx_parent_results(lines, conn, task.id, now)
     context_sections._ctx_comments(lines, kb.list_comments(conn, task.id), now)
@@ -190,7 +196,7 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
     log = files / "events.jsonl"
     cli = (["/usr/bin/python3", "-I", "-B", JOB_ROOT + "/.observer/start.py",
             engine, "--worker", isolation.IO + "/schema.json"] if observer else arguments(engine, events.session))
-    items = kb.list_attachments(conn, task.id)
+    items = attempts.input_attachments(conn, task.id)
     attachments = {Path(a.stored_path): f"{isolation.IO}/attachments/{i}/{Path(a.stored_path).name}"
                    for i, a in enumerate(items)}
     allowed = kb.task_attachments_dir(task.id, board=slug).resolve()
@@ -210,14 +216,16 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
         started = time.monotonic()
         next_heartbeat = started
         saved_session = False
+        stderr_tail = ""
         while True:
             code = proc.poll()
-            events.read(reader, finished=code is not None)
+            attempts.live_line(slug, task.id, run_id, events.read(reader, finished=code is not None))
             if events.session_confirmed and not saved_session:
                 kb.add_comment(conn, task.id, "project-cli",
                                f"{engine} session {events.session} · {cwd} · log {log}")
                 saved_session = True
             if code is not None:
+                attempts.live_stderr(slug, task.id, run_id, stderr_tail, finished=True)
                 break
             now = time.monotonic()
             if stopping.is_set() or (max_runtime and now - started >= max_runtime):
@@ -226,6 +234,7 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
                 if not kb.heartbeat_claim(conn, task.id, claimer=task.claim_lock):
                     raise RuntimeError("Kanban 작업의 소유권이 변경됐습니다.")
                 heartbeat_worker(conn, task.id, expected_run_id=run_id)
+                stderr_tail = attempts.live_stderr(slug, task.id, run_id, stderr_tail, finished=False)
                 next_heartbeat = now + 15
             stopping.wait(0.5)
     if observer and not events.success and events.error.startswith("BLOCKED:"):
@@ -262,6 +271,7 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
     if not kb.complete_task(conn, task.id, result=summary, summary=summary, expected_run_id=run_id,
                             metadata=metadata):
         raise RuntimeError("Kanban 완료 조건 또는 실행 소유권을 확인하세요.")
+    attempts.live_line(slug, task.id, run_id, "카드 완료 기록")
 
 
 def stop_event():
@@ -370,6 +380,7 @@ def serve():
         indexer = threading.Thread(target=knowledge.watch, args=(stopping,), name="qmd-indexer", daemon=True)
         indexer.start()
         active = {}
+        log_versions = {}
         total_limit = max(1, int(os.environ.get("HERMES_CLI_CONCURRENCY", "4")))
         project_limit = max(1, int(os.environ.get("HERMES_CLI_PROJECT_CONCURRENCY", "2")))
         try:
@@ -378,7 +389,19 @@ def serve():
                 # A running attempt precedes a waiting card, then preserve FIFO
                 # even when two requests have the same one-second creation time.
                 rows = []
-                for slug, conn in refresh().items():
+                boards = refresh()
+                for removed in log_versions.keys() - boards.keys():
+                    del log_versions[removed]
+                for slug, conn in boards.items():
+                    version = conn.execute("PRAGMA data_version").fetchone()[0]
+                    saved, retry = log_versions.get(slug, (None, 0))
+                    if version != saved and time.monotonic() >= retry:
+                        try:
+                            more = attempts.publish_closed(conn, slug)
+                            log_versions[slug] = (None if more else version, 0)
+                        except (OSError, sqlite3.Error, ValueError, LookupError):
+                            logging.getLogger(__name__).exception("Kanban attempt attachments · %s", slug)
+                            log_versions[slug] = (None, time.monotonic() + 30)
                     rows.extend(conn.execute("""
                         SELECT id, project_id, workspace_path, workspace_kind, (status = 'ready') AS waiting, created_at,
                                rowid AS sequence, ? AS board FROM tasks

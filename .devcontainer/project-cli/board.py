@@ -64,9 +64,11 @@ def project_for_checkout(path):
 
 
 def path_owners(conn):
+    from hermes_cli import projects_db as pdb
     folders = {}
-    for path, pid in conn.execute("SELECT path, project_id FROM project_folders"):
-        folders.setdefault(Path(path), set()).add(pid)
+    for project in pdb.list_projects(conn, include_archived=True):
+        for folder in project.folders:
+            folders.setdefault(Path(folder.path), set()).add(project.id)
 
     @lru_cache(maxsize=512)
     def owners(path):

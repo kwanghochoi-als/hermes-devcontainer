@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="$HOME/.local/bin:$PATH"
 script=$(realpath "${BASH_SOURCE[0]}")
 plugin_dir="$(dirname "$script")/project-cli"
+revision=$(<"$(dirname "$script")/hermes-revision")
 hermes_dir=${HERMES_HOME:-"$HOME/.hermes"}
+export PATH="$hermes_dir/hermes-agent/.hermes/bin:$HOME/.local/bin:$PATH"
 runtime=${XDG_STATE_HOME:-"$HOME/.local/state"}/hermes-project-cli
 mkdir -p -m 700 "$runtime"
 
 configure() {
   local installed="$hermes_dir/plugins/project-cli"
+  bash "$(dirname "$script")/setup-projects.sh" --verify
   mkdir -p -m 700 "$hermes_dir/plugins"
   if [[ ! -e "$installed" && ! -L "$installed" ]]; then
     ln -s "$plugin_dir" "$installed"
@@ -20,7 +22,7 @@ configure() {
   hermes plugins enable project-cli --no-allow-tool-override
   hermes project-cli --help >/dev/null
   hermes kanban boards create cli-workers --name "Project CLI workers" >/dev/null
-  touch "$runtime/configured"
+  printf '%s\n' "$revision" > "$runtime/configured"
 }
 
 gateway_running() {
@@ -41,7 +43,8 @@ supervise() {
   trap 'stopped=1' TERM INT
   mkdir -p -m 700 "$hermes_dir/logs"
   while (( ! stopped )); do
-    if [[ -f "$runtime/configured" ]]; then
+    if [[ -f "$runtime/configured" && "$(<"$runtime/configured")" == "$revision" &&
+          "$(git -C "$hermes_dir/hermes-agent" rev-parse HEAD 2>/dev/null)" == "$revision" ]]; then
       if [[ -z "$gateway_pid" ]] || ! kill -0 "$gateway_pid" 2>/dev/null; then
         # A gateway already started by a Hermes client also owns the native dispatcher.
         if ! gateway_running 9>&-; then
@@ -67,7 +70,7 @@ case "${1:-status}" in
   configure) configure ;;
   supervise) supervise "${2:-}" ;;
   start)
-    [[ -f "$runtime/configured" ]] || configure
+    [[ -f "$runtime/configured" && "$(<"$runtime/configured")" == "$revision" ]] || configure
     nohup setsid bash "$script" supervise detached </dev/null >>"$runtime/supervisor.log" 2>&1 &
     ;;
   status)

@@ -13,7 +13,10 @@ from uuid import uuid4
 
 
 def in_runtime(home, workspace, function):
-    install = Path.home() / ".hermes/hermes-agent"
+    install = Path(os.environ.get("HERMES_TEST_INSTALL", Path.home() / ".hermes/hermes-agent"))
+    (home / "plugins").mkdir()
+    (home / "plugins/project-cli").symlink_to(Path(__file__).resolve().parents[1] / "project-cli")
+    (home / "config.yaml").write_text("plugins:\n  enabled: [project-cli]\n")
     sys.path.insert(0, str(install))
     try:
         from hermes_cli._launchers import runtime_command
@@ -21,7 +24,8 @@ def in_runtime(home, workspace, function):
         sys.path.pop(0)
     env = dict(os.environ, HERMES_DASHBOARD_FILES_ROOT=str(workspace), HERMES_KANBAN_HOME=str(home),
                CODEX_HOME=str(home / "fixture-codex"), CLAUDE_CONFIG_DIR=str(home / "fixture-claude"))
-    for key in ("HERMES_HOME", "HERMES_KANBAN_DB", "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+    env["HERMES_HOME"] = str(install.parent)
+    for key in ("HERMES_KANBAN_DB", "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
         env.pop(key, None)
     code = (f"import os, runpy; os.environ['HERMES_HOME']={str(home)!r}; "
             f"runpy.run_path({str(Path(__file__).resolve())!r})[{function!r}]()")
@@ -31,14 +35,12 @@ def in_runtime(home, workspace, function):
 def check_middleware():
     from agent.runtime_cwd import reset_session_cwd, set_session_cwd
     from hermes_cli.plugins import _get_pre_tool_call_directive_details, discover_plugins
-    from hermes_cli.workspace_projects import knowledge
+    from hermes_cli.workspace_plugin import extension
+    knowledge = extension("knowledge")
     from hermes_constants import get_hermes_home
     from hermes_state import SessionDB
 
     home = get_hermes_home()
-    (home / "plugins").mkdir()
-    (home / "plugins/project-cli").symlink_to(Path(__file__).resolve().parents[1] / "project-cli")
-    (home / "config.yaml").write_text("plugins:\n  enabled: [project-cli]\n")
     (home / "qmd").mkdir()
     (home / "qmd/index.yml").write_text(json.dumps({"collections": {
         key: {"path": str(home / "qmd" / key), "pattern": "*.md"} for key in ("hermes-workspace", "second")
@@ -79,9 +81,11 @@ def check_middleware():
         t.assertIn(f"{name} · {sha}", note)
 
     from hermes_cli import projects_db as pdb, kanban_db as kb
-    from hermes_cli.workspace_projects import observer, worker
+    observer, worker = extension("observer"), extension("worker")
     with pdb.connect_closing() as db:
         from tui_gateway import server
+        catalog = server._methods["i18n.catalog"](1, {"lang": "ko", "surface": "desktop"})
+        t.assertIn("영구 삭제", catalog["result"]["messages"]["sidebar.projects.deleteOwnedConfirm"])
         reply = server._methods["projects.create_readonly"](1, {"name": "Research"})
         t.assertNotIn("error", reply)
         created = reply["result"]["project"]
@@ -134,7 +138,8 @@ def check_middleware():
 
 
 def check_container():
-    from hermes_cli.workspace_projects import isolation
+    from hermes_cli.workspace_plugin import extension
+    isolation = extension("isolation")
     from hermes_constants import get_hermes_home
 
     isolation.check_observer_mount()
@@ -184,7 +189,8 @@ def check_container():
     from types import SimpleNamespace
     owner = SimpleNamespace(id="p_fixture", folders=[SimpleNamespace(path=repo)],
                             observer_sources=json.dumps({"Data_API": str(repo)}))
-    from hermes_cli.workspace_projects.observer_runs import capture
+    from hermes_cli.workspace_plugin import extension
+    capture = extension("observer_runs").capture
     snapshot = capture(home / "fixture-runs", owner, "t_fixture", "1")
     for engine in ("codex", "claude"):
         files = home / f"readonly-{engine}"
@@ -219,7 +225,9 @@ def check_clone_discovery():
     from unittest.mock import patch
     from agent.runtime_cwd import reset_session_cwd, set_session_cwd
     from hermes_cli import kanban_db as kb, projects_db as pdb
-    from hermes_cli.workspace_projects import board, git_auth, isolation, observer, slash, submit_tool, worker
+    from hermes_cli.workspace_plugin import extension
+    board, git_auth, isolation, observer, worker = (extension(c) for c in ("board", "git_auth", "isolation", "observer", "worker"))
+    slash, submit_tool = extension().slash, extension().submit_tool
     from hermes_constants import get_hermes_home
 
     t = unittest.TestCase()

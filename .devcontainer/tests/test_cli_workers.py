@@ -22,6 +22,8 @@ emit({'type': 'thread.started', 'thread_id': session} if codex else
      {'type': 'system', 'subtype': 'init', 'session_id': session})
 prompt = sys.stdin.read()
 pathlib.Path('.probe-prompt').write_text(prompt)
+if 'WAIT_FOR_RESTART' in prompt:
+    print('API_KEY=sk-' + 'x' * 48 + '\\nlive stderr fixture', file=sys.stderr, flush=True)
 while 'WAIT_FOR_RESTART' in prompt and not pathlib.Path(os.environ['PROBE_GATE']).exists():
     time.sleep(0.2)
 report = {'status': 'completed', 'summary': session, 'tests': 'fixture'}
@@ -99,6 +101,13 @@ class WorkerRecovery(unittest.TestCase):
                 active = json.loads(inspect("runs", first, "--json"))[0]
                 self.assertEqual(active["last_step"], "CLI 세션 연결")
                 self.assertIn("thread.started", inspect("log", first, "--run", str(active["id"])))
+                deadline = time.monotonic() + 25
+                while "live stderr fixture" not in (live := inspect("log", first)):
+                    if time.monotonic() >= deadline:
+                        self.fail("The running attempt did not publish stderr to the native card log")
+                    time.sleep(0.2)
+                self.assertIn(f"Run #{active['id']} · CLI 세션 연결", live)
+                self.assertNotIn("x" * 48, live)
                 worker.kill()
                 worker.wait(timeout=10)
                 worker = serve()
@@ -113,6 +122,23 @@ class WorkerRecovery(unittest.TestCase):
                 first_try, retry = json.loads(inspect("runs", first, "--json"))
                 self.assertEqual(first_try["last_step"], "CLI 세션 연결")
                 self.assertEqual(retry["last_step"], "카드 완료 기록")
+                latest = subprocess.check_output(["hermes", "project-cli", "log", first, "--board", "cli-workers"],
+                                                 env=env, text=True)
+                self.assertIn(f"Run #{retry['id']}", latest)
+                for attempt in (first_try, retry):
+                    deadline = time.monotonic() + 12
+                    author = f"project-cli/run/{attempt['id']}"
+                    sql = "SELECT stored_path FROM task_attachments WHERE task_id=? AND uploaded_by=?"
+                    while not (saved := query(sql, first, author)):
+                        if time.monotonic() >= deadline:
+                            self.fail(f"Missing native attachment for {author}")
+                        time.sleep(0.2)
+                    self.assertIn(attempt["last_step"], Path(saved).name)
+                    self.assertIn("thread.started", Path(saved).read_text())
+                    self.assertNotIn("WAIT_FOR_RESTART", Path(saved).read_text())
+                    self.assertNotIn("x" * 48, Path(saved).read_text())
+                self.assertNotIn("project-cli/run/", (projects / "a/.probe-prompt").read_text())
+                self.assertNotIn(" · CLI 세션 연결.txt", (projects / "a/.probe-prompt").read_text())
                 self.assertNotIn("turn.completed", inspect("log", first, "--run", str(first_try["id"])))
                 self.assertIn("turn.completed", inspect("log", first, "--run", str(retry["id"])))
                 run_dir = state / "cli-workers" / "runs" / first / str(first_try["id"])

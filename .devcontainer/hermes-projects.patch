@@ -1,34 +1,46 @@
---- a/hermes_cli/projects_db.py
-+++ b/hermes_cli/projects_db.py
-@@ -217,6 +217,10 @@
-     return None
- 
- 
-+from hermes_cli.workspace_projects.provision import workspace_creator
+--- a/apps/desktop/src/app/chat/sidebar/project-dialog.test.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-dialog.test.tsx
+@@ -100,6 +100,18 @@
+ }
+
+ describe('ProjectDialog', () => {
++  it('creates a read-only project by name without writing the draft idea into the checkout', async () => {
++    render(<ProjectDialog />)
++    fireEvent.change(screen.getByPlaceholderText('Project name'), { target: { value: 'Review' } })
++    fireEvent.change(screen.getByPlaceholderText('What are you building?'), { target: { value: 'Draft' } })
++    fireEvent.click(screen.getByRole('checkbox', { name: '읽기 전용 (Observer)' }))
++    expect(screen.queryByPlaceholderText('What are you building?')).toBeNull()
++    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
++    await waitFor(() => expect(createProject).toHaveBeenCalledWith(
++      expect.objectContaining({ name: 'Review', folders: [], readonly: true, idea: undefined })
++    ))
++  })
 +
-+
-+@workspace_creator
- def create_project(
-     conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
-     primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
---- a/tools/project_tools.py
-+++ b/tools/project_tools.py
-@@ -116,7 +116,8 @@
-             if existing is not None:
-                 # Idempotent create: the folder already belongs to a project. Reusing it beats minting
-                 # a duplicate — duplicated projects render N identical sidebar subtrees (#75820).
--                proj = existing
-+                from hermes_cli.workspace_projects.provision import provision_existing
-+                proj = provision_existing(pdb, conn, existing)
-             else:
-                 pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None)
-                 proj = pdb.get_project(conn, pid)
+   it('creates from the folder basename and enters the created project when the name is empty', async () => {
+     render(<ProjectDialog />)
+
 --- a/apps/desktop/src/app/chat/sidebar/project-dialog.tsx
 +++ b/apps/desktop/src/app/chat/sidebar/project-dialog.tsx
-@@ -160,9 +160,8 @@
+@@ -48,6 +48,7 @@
+
+   const [name, setName] = useState('')
+   const [folders, setFolders] = useState<string[]>([])
++  const [readonly, setReadonly] = useState(false)
+   const [idea, setIdea] = useState('')
+   const [templates, setTemplates] = useState<ProjectIdeaTemplate[]>([])
+   const [generatingIdea, setGeneratingIdea] = useState(false)
+@@ -74,6 +75,7 @@
+     if (open) {
+       setName(state?.name ?? '')
+       setFolders([])
++      setReadonly(false)
+       setIdea('')
+       setTemplates(randomIdeaTemplates())
+       setGeneratingIdea(false)
+@@ -160,9 +162,8 @@
        return
      }
- 
+
 -    // A project owns sessions by folder (cwd-prefix), so creation requires at
 -    // least one — a folder-less project couldn't hold a session anyway.
 -    if (mode === 'create' && trimmed && folders.length) {
@@ -37,16 +49,26 @@
        // The arm is consumed exactly on SUCCESS (before the close): a failed
        // create leaves the dialog open for a retry that still lands where it
        // was dropped; the open-state effect discards it on cancel/teardown.
-@@ -207,7 +206,7 @@
+@@ -170,7 +171,8 @@
+         const created = await createProject({
+           dropPlacement,
+           folders,
+-          idea: idea.trim() || undefined,
++          idea: readonly ? undefined : idea.trim() || undefined,
++          readonly,
+           name: trimmed,
+           use: true
+         })
+@@ -207,7 +209,7 @@
        <DialogContent className="max-w-md" onInteractOutside={event => event.preventDefault()}>
          <DialogHeader>
            <DialogTitle>{title}</DialogTitle>
 -          {mode === 'create' && <DialogDescription>{p.createDesc}</DialogDescription>}
 +          {mode === 'create' && folders.length > 0 && <DialogDescription>{p.createDesc}</DialogDescription>}
          </DialogHeader>
- 
+
          {mode !== 'add-folder' && (
-@@ -233,7 +232,7 @@
+@@ -233,7 +235,7 @@
            <div className="flex flex-col gap-1.5">
              <span className="text-[0.6875rem] font-medium text-(--ui-text-tertiary)">{p.foldersLabel}</span>
              {folders.length === 0 ? (
@@ -55,7 +77,21 @@
              ) : (
                <ul className="flex flex-col gap-1">
                  {folders.map((folder, index) => (
-@@ -345,7 +344,7 @@
+@@ -283,6 +285,13 @@
+         )}
+
+         {mode === 'create' && (
++          <label className="flex items-center gap-2 text-sm">
++            <input type="checkbox" checked={readonly} disabled={submitting} onChange={event => setReadonly(event.target.checked)} />
++            읽기 전용 (Observer)
++          </label>
++        )}
++
++        {mode === 'create' && !readonly && (
+           <div className="flex flex-col gap-1.5">
+             <span className="text-[0.6875rem] font-medium text-(--ui-text-tertiary)">{p.ideaLabel}</span>
+             <div className="relative">
+@@ -345,7 +354,7 @@
                {t.common.cancel}
              </Button>
              <Button
@@ -64,3 +100,475 @@
                onClick={() => void submit()}
                type="button"
              >
+--- a/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
++++ b/apps/desktop/src/app/chat/sidebar/projects/project-menu.tsx
+@@ -154,7 +154,9 @@
+   const confirmDialog = (
+     <ConfirmDialog
+       confirmLabel={p.menuDelete}
+-      description={p.deleteConfirm}
++      description={'deleteOwnedConfirm' in p && typeof p.deleteOwnedConfirm === 'string'
++        ? p.deleteOwnedConfirm
++        : 'Permanently delete this project, its dedicated Kanban board, sessions, and indexed knowledge? Your source files, Git repositories, and worktrees will be kept.'}
+       destructive
+       onClose={() => setConfirmDeleteOpen(false)}
+       onConfirm={confirmDelete}
+--- a/apps/desktop/src/store/projects.test.ts
++++ b/apps/desktop/src/store/projects.test.ts
+@@ -730,6 +730,22 @@
+     }
+   )
+
++  it('keeps the selected project visible when a running card prevents deletion', async () => {
++    const reply = deferred<never>()
++    const request = vi.fn(() => reply.promise)
++
++    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
++    $activeProjectId.set(project.id)
++    const result = deleteProject(project.id)
++
++    await waitFor(() => expect(request).toHaveBeenCalled())
++    expect($projects.get()).toEqual([project])
++    expect($projectTree.get().map(row => row.id)).toEqual([project.id])
++    reply.reject(new Error('Card is running'))
++    await expect(result).rejects.toThrow('Card is running')
++    expect($activeProjectId.get()).toBe(project.id)
++  })
++
+   it.each(['default', 'coder'])(
+     'deletes a project in the active %s profile without leaving All profiles',
+     async profile => {
+@@ -740,7 +756,7 @@
+
+       await expect(deleteProject(project.id)).resolves.toBeUndefined()
+
+-      expect(request).toHaveBeenCalledWith('projects.delete', expect.objectContaining({ profile, id: project.id }))
++      expect(request).toHaveBeenCalledWith('projects.delete', expect.objectContaining({ profile, id: project.id, delete_owned_data: true }))
+       expect($profileScope.get()).toBe(ALL_PROFILES)
+       expect($projects.get()).toEqual([])
+     }
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -1001,6 +1001,7 @@
+ }
+
+ export interface CreateProjectInput {
++  readonly?: boolean
+   name: string
+   folders?: string[]
+   primaryPath?: string
+@@ -1125,10 +1126,11 @@
+
+     res = await gatewayRequestOn<{ project: ProjectInfo | null }>(
+       context.gateway,
+-      'projects.create',
++      input.readonly ? 'projects.create_readonly' : 'projects.create',
+       projectParams(
+         {
+           name: input.name,
++          readonly: input.readonly,
+           folders: input.folders ?? [],
+           primary_path: input.primaryPath,
+           slug: input.slug,
+@@ -1143,7 +1145,7 @@
+     )
+   } catch (err) {
+     if (isMissingRpcMethod(err)) {
+-      if (context && stillOnWritableProjectOwner(context)) {
++      if (!input.readonly && context && stillOnWritableProjectOwner(context)) {
+         $projectsRpcAvailable.set(false)
+       }
+
+@@ -1173,7 +1175,7 @@
+   const created = res.project
+
+   if (created) {
+-    if (input.idea) {
++    if (input.idea && !created.readonly) {
+       void writeProjectIdea(created.primary_path ?? created.folders?.[0]?.path ?? input.primaryPath, input.idea)
+     }
+
+@@ -1355,38 +1357,29 @@
+   return Boolean(open && liveSessionProjectId(open, projects, $projectOwnerBySessionId.get()) === projectId)
+ }
+
+-// Optimistic: drop the project from the cached tree + list the instant it's
+-// clicked (the entered-scope effect exits if you deleted the project you were
+-// inside), reconciling from the server payload. A failed delete restores both.
++// Keep the row (and its confirmation dialog) mounted until the owning gateway
++// accepts deletion. A busy board can then show its card IDs and be retried.
+ export async function deleteProject(id: string): Promise<void> {
+   const context = await activeProjectsContext(writableProjectProfile())
+-  const snap = snapshotProjects()
+-  // Capture membership BEFORE removal — the project's folders (which determine
+-  // ownership) are gone once it's dropped from the cache.
+-  const kickToIntro = openSessionBelongsToProject(id, snap.projects)
+-
+-  $projects.set(snap.projects.filter(project => project.id !== id))
+-  $projectTree.set(snap.tree.filter(node => node.id !== id))
+-
+-  if (snap.active === id) {
+-    $activeProjectId.set(null)
+-  }
+-
+-  // The open session's project is gone — reset to the intro draft (the session
+-  // itself survives; it just falls back to Recents).
+-  if (kickToIntro) {
++  const selected = $selectedStoredSessionId.get()
++  const kickToIntro = openSessionBelongsToProject(id, $projects.get())
++  const result = await gatewayRequestOn<ProjectsPayload>(
++    context.gateway,
++    'projects.delete',
++    projectParams({ id, delete_owned_data: true }, context.profile)
++  )
++
++  if (!stillOnWritableProjectOwner(context)) {
++    return
++  }
++
++  applyPayload(result)
++  $projectTree.set($projectTree.get().filter(node => node.id !== id))
++
++  if (kickToIntro && $selectedStoredSessionId.get() === selected) {
+     requestFreshSession()
+   }
+
+-  await persistOrRollback(snap, async () => {
+-    applyPayload(
+-      await gatewayRequestOn<ProjectsPayload>(
+-        context.gateway,
+-        'projects.delete',
+-        projectParams({ id }, context.profile)
+-      )
+-    )
+-  })
+   void refreshProjectTree()
+ }
+
+--- a/apps/desktop/src/types/hermes.ts
++++ b/apps/desktop/src/types/hermes.ts
+@@ -1205,6 +1205,7 @@
+ }
+
+ export interface ProjectInfo {
++  readonly?: boolean
+   id: string
+   slug: string
+   name: string
+--- a/hermes_cli/projects_cmd.py
++++ b/hermes_cli/projects_cmd.py
+@@ -30,6 +30,8 @@
+     for opt in ("--description", "--icon", "--color"):
+         p_create.add_argument(opt, default=None)
+     p_create.add_argument("--board", default=None, metavar="SLUG", help="Bind a kanban board")
++    p_create.add_argument("--readonly", action="store_true", default=None, help="Run both CLI workers as read-only observers")
++    p_create.add_argument("--source", action="append", metavar="NAME=HTTPS_URL", help="Repository to observe (repeatable)")
+     p_create.add_argument("--use", action="store_true", help="Set as the active project")
+     p_list = sub.add_parser("list", aliases=["ls"], help="List projects")
+     p_list.add_argument("--all", action="store_true", dest="include_archived", help="Include archived projects")
+@@ -49,6 +51,9 @@
+     project_sub("set-primary", "Set the primary folder").add_argument("path", help="Folder path (must already be in project)")
+     p_use = sub.add_parser("use", help="Set the active project")
+     p_use.add_argument("project", nargs="?", default=None, help="Project id or slug (omit to clear)")
++    p_delete = project_sub("delete", "Permanently delete the project, its dedicated Kanban board, sessions and indexed knowledge")
++    p_delete.description = "프로젝트와 전용 칸반·세션·QMD 지식을 영구 삭제합니다. 소스 폴더와 Git 저장소는 보존합니다."
++    p_delete.add_argument("-y", "--yes", action="store_true", help="Confirm deletion without prompting")
+     project_sub("archive", "Archive a project")
+     project_sub("restore", "Restore an archived project")
+     project_sub("bind-board", "Bind a kanban board to a project").add_argument(
+@@ -120,10 +125,15 @@
+
+ def _print_project(proj) -> None:
+     print(f"{proj.slug}  [{proj.id}]{' (archived)' if proj.archived else ''}")
++    print("  mode:    " + ("readonly" if proj.readonly else "readwrite"))
+     print(f"  name:    {proj.name}")
+     for label, value in (("about", proj.description), ("board", proj.board_slug), ("primary", proj.primary_path)):
+         if value:
+             print(f"  {label}:{' ' * (8 - len(label))}{value}")
++    if proj.readonly:
++        import json
++        for name, source in json.loads(proj.observer_sources).items():
++            print(f"  source:  {name} = {source}")
+     if proj.folders:
+         print("  folders:")
+         for f in proj.folders:
+@@ -134,6 +144,7 @@
+ def _cmd_create(args, conn) -> int:
+     pid = pdb.create_project(
+         conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
++        readonly=args.readonly, sources=args.source,
+         description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
+     )
+     if args.use:
+@@ -166,6 +177,22 @@
+
+
+ @_with_project
++def _cmd_delete(args, conn, proj):
++    if not args.yes:
++        if not sys.stdin.isatty():
++            return _err(f"확인 후 실행하세요 · hermes project delete {proj.slug} --yes")
++        print(f"프로젝트 {proj.name} ({proj.slug})와 전용 칸반, 세션, QMD 지식을 영구 삭제합니다. 소스 폴더와 Git 저장소는 보존합니다.")
++        try:
++            if input(f"확인하려면 {proj.slug} 입력 · ").strip() != proj.slug:
++                return _err("삭제를 취소했습니다.")
++        except (EOFError, KeyboardInterrupt):
++            return _err("삭제를 취소했습니다.")
++    if not pdb.delete_project(conn, proj.id):
++        return _err(f"이미 삭제된 프로젝트입니다 · {proj.slug}")
++    return f"프로젝트와 전용 데이터를 삭제했습니다 · {proj.slug}"
++
++
++@_with_project
+ def _cmd_add_folder(args, conn, proj) -> str:
+     path = pdb.add_folder(conn, proj.id, args.path, label=args.label, is_primary=args.primary)
+     return f"Added {path} to {proj.slug}"
+@@ -230,6 +257,7 @@
+     "list": _cmd_list,
+     "ls": _cmd_list,
+     "show": _cmd_show,
++    "delete": _cmd_delete,
+     "add-folder": _cmd_add_folder,
+     "remove-folder": _cmd_remove_folder,
+     "rename": _cmd_rename,
+--- a/hermes_cli/projects_db.py
++++ b/hermes_cli/projects_db.py
+@@ -74,9 +74,9 @@
+ _INITIALIZED_PATHS: set[str] = set()
+ # TEXT columns added to `projects` after v1; re-applied idempotently on every open so a legacy DB
+ # upgrades in place.
+-_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
++_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color", "observer_sources")
+ # Nullable TEXT columns that may be absent from a legacy row.
+-_OPTIONAL_ROW_FIELDS = ("description", "icon", "color", "board_slug", "primary_path")
++_OPTIONAL_ROW_FIELDS = ("description", "icon", "color", "board_slug", "primary_path", "observer_sources")
+ _ACTIVE_META_KEY = "active_id"
+ _DISCOVERY_POLICY_META_KEY = "repo_discovery_policy"
+
+@@ -170,8 +170,15 @@
+     archived: bool = False
+     folders: list[ProjectFolder] = field(default_factory=list)
+
++    observer_sources: Optional[str] = None
++
++    @property
++    def readonly(self) -> bool:
++        return self.observer_sources is not None
++
+     def to_dict(self) -> dict:
+         d = {k: getattr(self, k) for k in ("id", "slug", "name", *_OPTIONAL_ROW_FIELDS)}
++        d["readonly"] = d.pop("observer_sources") is not None
+         return {**d, "archived": bool(self.archived), "created_at": self.created_at, "folders": [f.to_dict() for f in self.folders]}
+
+
+@@ -217,10 +224,15 @@
+     return None
+
+
++from hermes_cli.workspace_plugin import workspace_creator
++
++
++@workspace_creator
+ def create_project(
+     conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
+     primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
+     color: Optional[str] = None, board_slug: Optional[str] = None, allow_duplicate_path: bool = False,
++    observer_sources: Optional[str] = None,
+ ) -> str:
+     """Create a project and return its id. ``folders`` are normalized to absolute paths; ``primary_path``
+     is added to the folder set (if absent) and marked primary, else the first folder becomes primary."""
+@@ -244,10 +256,10 @@
+         )
+     with write_txn(conn):
+         conn.execute(
+-            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, archived) "
+-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
++            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, observer_sources, archived) "
++            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+             (pid, _unique_slug(conn, slug_candidate), name, description, icon, color,
+-             normalize_slug(board_slug) if board_slug else None, primary, now),
++             normalize_slug(board_slug) if board_slug else None, primary, now, observer_sources),
+         )
+         conn.executemany(
+             "INSERT INTO project_folders (project_id, path, label, is_primary, added_at) VALUES (?, ?, ?, ?, ?)",
+@@ -368,8 +380,10 @@
+
+
+ def delete_project(conn: sqlite3.Connection, project_id: str) -> bool:
+-    """Hard-delete a project and its folders (cascade)."""
+-    return _execute_rowcount(conn, "DELETE FROM projects WHERE id = ?", (project_id,)) > 0
++    """Delete the project and its owned Hermes data, preserving source checkouts."""
++    from hermes_cli.workspace_plugin import extension
++    delete_workspace_project = extension("removal").delete_project
++    return delete_workspace_project(conn, project_id)
+
+
+ # --- Active-project pointer + discovery policy (project_meta KV) --------------
+--- a/tools/project_tools.py
++++ b/tools/project_tools.py
+@@ -68,7 +68,7 @@
+     _apply_workspace(task_id, primary, proj.name)
+     return json.dumps({
+         "success": True, "id": proj.id, "slug": proj.slug, "name": proj.name,
+-        "primary_path": primary})
++        "primary_path": primary, "readonly": proj.readonly})
+
+
+ def _calling_session_project_id(conn, task_id: Optional[str]) -> tuple[bool, Optional[str]]:
+@@ -98,11 +98,11 @@
+         "projects": [
+             {
+                 "id": p.id, "slug": p.slug, "name": p.name,
+-                "primary_path": _primary_path(p), "active": p.id == active}
++                "primary_path": _primary_path(p), "readonly": p.readonly, "active": p.id == active}
+             for p in projects]})
+
+
+-def project_create(name: str, path: Optional[str] = None, task_id: Optional[str] = None) -> str:
++def project_create(name: str, path: Optional[str] = None, task_id: Optional[str] = None, readonly: bool = False) -> str:
+     name = (name or "").strip()
+     if not name:
+         return json.dumps({"success": False, "error": "name is required"})
+@@ -116,9 +116,13 @@
+             if existing is not None:
+                 # Idempotent create: the folder already belongs to a project. Reusing it beats minting
+                 # a duplicate — duplicated projects render N identical sidebar subtrees (#75820).
+-                proj = existing
++                from hermes_cli.workspace_plugin import extension
++                provision_existing = extension("provision").provision_existing
++                if readonly and not existing.readonly:
++                    raise ValueError("The existing project is read-write.")
++                proj = provision_existing(pdb, conn, existing)
+             else:
+-                pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None)
++                pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None, readonly=readonly)
+                 proj = pdb.get_project(conn, pid)
+             # A live session that moves owns its workspace, so it leaves the profile-global pointer
+             # alone (a background chat would otherwise redirect the sidebar). Anything that can't
+@@ -147,7 +151,7 @@
+ _ACTIONS = {
+     "list": lambda args, tid: project_list(task_id=tid),
+     "create": lambda args, tid: project_create(
+-        name=args.get("name", ""), path=args.get("path"), task_id=tid),
++        name=args.get("name", ""), path=args.get("path"), task_id=tid, readonly=args.get("readonly", False)),
+     "switch": lambda args, tid: project_switch(project=args.get("name", ""), task_id=tid)}
+
+
+@@ -178,6 +182,7 @@
+             "properties": {
+                 "action": {"type": "string", "enum": ["create", "switch", "list"]},
+                 "name": {"type": "string", "description": "create: human name. switch: name, slug, or id."},
++                "readonly": {"type": "boolean", "description": "create: observe committed sources with read-only CLI workers."},
+                 "path": {"type": "string", "description": "create: repo/folder to anchor to."},
+             },
+             "required": ["action"],
+--- a/tui_gateway/contracts/projects_pets.py
++++ b/tui_gateway/contracts/projects_pets.py
+@@ -40,6 +40,7 @@
+     color: str | None = None
+     board_slug: str | None = None
+     primary_path: str | None = None
++    readonly: bool = False
+     archived: bool = False
+     created_at: int
+     folders: list[ProjectFolder] = Field(default_factory=list)
+@@ -83,11 +84,17 @@
+     icon: str | None = None
+     color: str | None = None
+     board_slug: str | None = None
++    readonly: bool = False
++    sources: list[str] | None = None
+     use: bool = False
+
+
+ method("projects.create", params=ProjectsCreateParams, result=OptionalProjectResult,
+        doc="Create a project from a name + folders; duplicate primary paths are refused (5063).")
++
++
++method("projects.create_readonly", params=ProjectsCreateParams, result=OptionalProjectResult,
++       doc="Create an observer project with a project-scoped read-only source policy.")
+
+
+ class ProjectsUpdateParams(ProjectIdParams):
+@@ -128,10 +135,14 @@
+     restore: bool = False
+
+
++class ProjectsDeleteParams(ProjectIdParams):
++    delete_owned_data: bool = False
++
++
+ method("projects.archive", params=ProjectsArchiveParams, result=ProjectsPayload,
+        doc="Archive (or with ``restore`` un-archive) a project; answers the full listing.")
+-method("projects.delete", params=ProjectIdParams, result=ProjectsPayload,
+-       doc="Delete a project and its folders; answers the full listing.")
++method("projects.delete", params=ProjectsDeleteParams, result=ProjectsPayload,
++       doc="Permanently delete the project and its owned board, sessions and indexed knowledge after confirmation.")
+
+
+ class ProjectsSetActiveParams(ProfileParams):
+--- a/tui_gateway/methods_projects.py
++++ b/tui_gateway/methods_projects.py
+@@ -88,11 +88,10 @@
+     return _ok(rid, {"project": _require_project(pdb, conn, params).to_dict()})
+
+
+-@_projects_method("projects.create")
+-def _(rid, params, pdb, conn) -> dict:
++def _create_workspace(rid, params, pdb, conn) -> dict:
+     pid = pdb.create_project(
+         conn, name=str(params.get("name") or ""), folders=params.get("folders") or [],
+-        **_pick(params, "slug", "primary_path", "description", "icon", "color", "board_slug"))
++        **_pick(params, "readonly", "sources", "slug", "primary_path", "description", "icon", "color", "board_slug"))
+     if params.get("use"):
+         pdb.set_active(conn, pid)
+     from hermes_cli.observability.shared_metrics_signals import record_feature_used
+@@ -101,6 +100,16 @@
+     return _ok(rid, {"project": proj.to_dict() if proj else None})
+
+
++@_projects_method("projects.create_readonly")
++def _(rid, params, pdb, conn) -> dict:
++    return _create_workspace(rid, {**params, "readonly": True}, pdb, conn)
++
++
++@_projects_method("projects.create")
++def _(rid, params, pdb, conn) -> dict:
++    return _create_workspace(rid, params, pdb, conn)
++
++
+ @_projects_method("projects.archive")
+ def _(rid, params, pdb, conn) -> dict:
+     proj = _require_project(pdb, conn, params)
+@@ -110,7 +119,11 @@
+
+ @_projects_method("projects.delete")
+ def _(rid, params, pdb, conn) -> dict:
+-    pdb.delete_project(conn, _require_project(pdb, conn, params).id)
++    project = _require_project(pdb, conn, params)
++    if params.get("id") != project.id or params.get("delete_owned_data") is not True:
++        raise ValueError("새로고침 후 프로젝트와 전용 데이터의 영구 삭제를 확인하세요.")
++    if not pdb.delete_project(conn, project.id):
++        raise _NoProject
+     return _ok(rid, _projects_payload(conn))
+
+
+@@ -398,6 +411,9 @@
+ ) -> tuple[dict, str | None]:
+     """Gather inputs and run the one authoritative builder. Returns (tree, active_id)."""
+     from tui_gateway import project_tree
++    from hermes_cli.workspace_plugin import extension
++    removal = extension("removal", required=False)
++    hidden = removal.hidden_project_paths() if removal else frozenset().__contains__
+     _DIR_EXISTS_CACHE.clear()
+     with contextlib.nullcontext(persistence) if persistence is not None else _persistence_for(db) as persistence:
+         sessions, projects, discovered, active_id = _project_tree_inputs(
+@@ -408,6 +424,7 @@
+         + [str(r.get("root") or "") for r in discovered])
+     tree = project_tree.build_tree(
+         projects, sessions, discovered, git_probe.resolve, preview_limit=preview_limit,
+-        hydrate=hydrate, is_junk_root=_is_repo_junk, is_junk_cwd=_is_session_cwd_junk,
++        hydrate=hydrate, is_junk_root=lambda path: hidden(path) or _is_repo_junk(path),
++        is_junk_cwd=lambda path: hidden(path) or _is_session_cwd_junk(path),
+         exists=_dir_exists_cached)
+     return tree, active_id

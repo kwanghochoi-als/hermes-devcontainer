@@ -177,25 +177,43 @@ def register_collection(workspace):
     return name
 
 
-def sync_pending(conn, slug, qmd_dir, retry_after, stopping):
-    # The findings and outcome share the native completion transaction. A crash anywhere
-    # before the acknowledgement leaves the run eligible, even across a container restart.
-    rows = conn.execute("""
-        SELECT r.id, r.task_id, r.profile, r.ended_at, r.metadata FROM task_runs r
-        WHERE r.outcome = 'completed' AND r.profile IN (?, ?)
-          AND CASE WHEN json_valid(r.metadata) THEN (json_array_length(r.metadata, '$.knowledge') > 0
-                   OR json_type(r.metadata, '$.source_commits') = 'object') END
-          AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.run_id = r.id
-                          AND e.task_id = r.task_id AND e.kind = 'knowledge_indexed')
-        ORDER BY r.id
-    """, tuple(LANES)).fetchall()
+def sync_pending(conn, slug, qmd_dir, retry_after, stopping, after, through):
+    # Recover from committed runs at startup or retry, even if old events were pruned.
+    # During normal operation the native completion event and outcome share a transaction.
+    if after is None:
+        candidates = conn.execute("""
+            SELECT r.id FROM task_runs r WHERE r.outcome='completed' AND r.profile IN (?, ?)
+              AND r.metadata IS NOT NULL AND NOT EXISTS (SELECT 1 FROM task_events ack
+                  WHERE ack.task_id=r.task_id AND ack.run_id=r.id AND ack.kind='knowledge_indexed')
+            ORDER BY r.id
+        """, tuple(LANES))
+    else:
+        candidates = conn.execute("""
+            SELECT DISTINCT e.run_id FROM task_events e WHERE e.id>? AND e.id<=?
+              AND e.kind='completed' AND e.run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM task_events ack
+                  WHERE ack.task_id=e.task_id AND ack.run_id=e.run_id AND ack.kind='knowledge_indexed')
+        """, (after, through))
     projects = defaultdict(list)
-    for row in rows:
-        meta = json.loads(row["metadata"])
-        projects[collection_name(meta.get("knowledge_workspace") or meta["workspace"])].append((row, meta))
+    for run_id, in candidates:
+        run = kb.get_run(conn, run_id)
+        if not run or run.profile not in LANES or run.outcome != "completed" or not isinstance(run.metadata, dict):
+            continue
+        meta = run.metadata.copy()
+        workspace = meta.get("workspace")
+        if not isinstance(workspace, str) or not workspace.strip() or run.ended_at is None:
+            continue
+        meta["knowledge"] = findings(meta.get("knowledge"))
+        if not meta["knowledge"] and not isinstance(meta.get("source_commits"), dict):
+            continue
+        if not isinstance(meta.get("source_commits"), dict):
+            meta.pop("source_commits", None)
+        project = meta.get("knowledge_workspace")
+        row = {"id": run.id, "task_id": run.task_id, "profile": run.profile, "ended_at": run.ended_at}
+        projects[collection_name(project if isinstance(project, str) and project else workspace)].append((row, meta))
 
-    for name in retry_after.keys() - projects.keys():
-        del retry_after[name]
+    if after is None:
+        for name in retry_after.keys() - projects.keys():
+            del retry_after[name]
     for name, runs in projects.items():
         if stopping.is_set():
             return
@@ -240,9 +258,13 @@ def watch(stopping):
                     for slug, conn in connections.items():
                         version = conn.execute("PRAGMA data_version").fetchone()[0]
                         retry_after = retries[slug]
-                        if version != versions.get(slug) or any(t <= time.monotonic() for t in retry_after.values()):
-                            sync_pending(conn, slug, get_hermes_home() / "qmd", retry_after, stopping)
-                            versions[slug] = version
+                        previous, cursor = versions.get(slug, (None, None))
+                        retry_due = any(t <= time.monotonic() for t in retry_after.values())
+                        if version != previous or retry_due:
+                            through = conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
+                            sync_pending(conn, slug, get_hermes_home() / "qmd", retry_after, stopping,
+                                         None if retry_due else cursor, through)
+                            versions[slug] = version, through
                     stopping.wait(2)
         except Exception as exc:
             print(f"QMD 완료 카드 읽기 재시도 대기 · {exc}", file=sys.stderr, flush=True)

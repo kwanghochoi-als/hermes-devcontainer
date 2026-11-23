@@ -172,9 +172,8 @@ def publish(channel, slug, kanban, event):
     header = f"{title} · {project} · {task.assignee or 'Hermes'}\n보드 {slug} · 카드 {task.id}"
     reason = detail.get("reason") or detail.get("summary") or detail.get("error") or ""
     if event.kind == "completed":
-        run = kanban.execute("SELECT summary FROM task_runs WHERE task_id=? AND id=?",
-                             (task.id, event.run_id)).fetchone()
-        reason = (run[0] if run else "") or reason or task.result
+        run = kb.get_run(kanban, event.run_id) if event.run_id is not None else None
+        reason = (run.summary if run and run.task_id == task.id else "") or reason or task.result
     reason = tg.clean(reason)
     message = f"{tg.clean(header)}\n{tg.clean(task.title)[:180]}\n\n{reason if kind else reason[:2800]}".strip()
     ref = None

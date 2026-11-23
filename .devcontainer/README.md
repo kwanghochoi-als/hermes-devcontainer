@@ -34,11 +34,12 @@ hermes kanban --board test-prj list
 hermes kanban --board test-prj show <카드-ID>
 hermes kanban --board test-prj runs <카드-ID>
 hermes kanban --board test-prj log <카드-ID> --run <Run-ID>
+hermes project-cli log <카드-ID> --board test-prj
 ```
 
 ## 실행과 재개
 
-웹앱은 카드의 **Runs**, 대시보드는 **Run history**에서 시도별 Run ID와 마지막으로 성공한 단계를 보여줍니다. **시도 로그 보기**를 열면 해당 시도의 CLI 실행 이벤트와 표준 오류를 확인할 수 있습니다. 실행 중에는 열린 로그가 자동 갱신됩니다.
+웹앱과 대시보드에서 카드를 열면 기본 **Worker log**에 실행 중인 Run 번호와 통과한 단계, CLI 이벤트가 표시됩니다. 종료된 시도는 **Attachments**에서 `Run 17 · CLI 세션 연결.txt`처럼 마지막 성공 단계가 적힌 파일로 열 수 있습니다. 이 파일에는 해당 시도의 실행 이벤트와 표준 오류가 들어갑니다. 워커를 재시작하면 이전에 종료된 시도의 첨부도 순차적으로 채웁니다. 작업자가 다음 시도의 입력으로 받는 첨부는 운영자가 올린 자료입니다.
 
 CLI에서는 `runs`에 표시된 **Run # 뒤의 숫자**를 `log --run`에 사용합니다. 두 로그에서 각각 최근 64 KiB까지 읽고, 잘린 줄은 생략합니다. CLI 이벤트는 유형·종료 코드·오류 위주로 표시하고 인증 정보는 가립니다. 새 시도에서는 작업 폴더 검증, 컨테이너 시작, CLI 세션 연결, 결과 보고 수신을 기록합니다. 읽기 전용 프로젝트에서는 스냅샷 사전 점검과 두 훅의 자가 검사 성공도 기록합니다. 기존 시도에는 당시 Kanban에 기록된 단계만 표시합니다.
 
@@ -172,13 +173,50 @@ Git 커밋을 확정하면 Kanban 실행 이벤트에 저장소별 SHA를 기록
 
 VS Code에서 **Dev Containers: Rebuild Container**를 실행하면 Docker Compose가 영속 볼륨을 만들거나 기존 볼륨을 연결합니다. 초기 설치가 끝나면 아래 순서로 두 CLI와 Hermes를 인증합니다.
 
-초기 설치는 `.devcontainer/setup-projects.sh`에서 Hermes 기본 생성기와 웹앱 폼에 연동 패치를 적용한 다음 웹앱을 빌드합니다.
+초기 설치는 `.devcontainer/hermes-revision`에 적힌 전체 Git SHA의 공식 설치 스크립트와 소스를 사용합니다. 영속 볼륨에서도 같은 SHA를 확인한 뒤 연동 코드를 적용하고 웹앱을 빌드합니다. 프로필의 `plugins/project-cli`가 워커·텔레그램·QMD·프로젝트 정책을 제공합니다. Hermes는 활성 프로필에 등록된 플러그인을 불러옵니다.
 
 Observer 정책 원본은 호스트 작업 폴더의 `.devcontainer/observer/`에 있습니다. 읽기 전용 카드를 실행할 때마다 새 워커의 `/opt/hermes-observer`에 이 폴더를 읽기 전용으로 마운트합니다. 리빌드 후 초기 설정은 임시 워커에서 Codex·Claude 훅이 테스트 커밋을 읽고 쓰기 요청을 차단하는지 확인합니다. devcontainer 셸에서 같은 점검을 다시 실행할 수 있습니다.
 
 ```bash
 hermes project-cli observer-check
 ```
+
+### Hermes 버전 변경 및 복구
+
+1. 후보 버전은 운영 저장소의 별도 체크아웃에서 검증합니다. `.devcontainer/hermes-revision`에 후보의 40자리 SHA를 기록하고 `project-cli/plugin.yaml`의 Hermes 버전 범위를 확인합니다. 호스트에서 별도 Compose 프로젝트 이름, 컨트롤러 이름, 빈 볼륨을 지정해 이 체크아웃을 devcontainer로 엽니다. 예를 들어 `COMPOSE_PROJECT_NAME=hermes-trial`, `HERMES_CLI_CONTROLLER=agent-cli-trial`, `HERMES_HOME_VOLUME=hermes-trial-home`을 사용합니다. 검증은 로컬 테스트 봇과 임시 Git 저장소·QMD 컬렉션을 사용합니다.
+2. 후보 컨테이너에서 아래 명령을 실행합니다. 첫 명령은 지정된 Git 커밋으로 임시 트리를 구성해 패치와 공식 RPC 코드 생성을 검사합니다. 두 번째 명령은 설치된 결과, 플러그인, 웹앱 빌드, 프로젝트와 승인 흐름, 읽기 전용 Git 워커를 검증합니다. 생성·삭제 시 원본 보존, 두 CLI의 재시도, 이미 처리한 Telegram 응답, QMD 장애 복구까지 포함합니다.
+
+   ```bash
+   bash .devcontainer/setup-projects.sh --check
+   bash .devcontainer/verify-hermes.sh
+   ```
+
+3. 운영 전환 시 실행 중인 작업을 마치고 운영 컨테이너를 중지합니다. 운영 설정 저장소의 Git SHA, Hermes SHA, 원본 `hermes_home` 볼륨명을 함께 기록합니다. 중지된 볼륨의 사본에 새 버전을 적용하면 기존 코드·데이터 조합으로 돌아갈 수 있습니다. 아래는 호스트의 운영 설정 저장소에서 실행하는 예시입니다. `agent-cli`는 실제 운영 컨테이너명으로, `$PWD`는 검증을 마친 설정 저장소 경로로 지정합니다.
+
+   ```bash
+   controller=agent-cli
+   original=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/ubuntu/.hermes"}}{{.Name}}{{end}}{{end}}' "$controller")
+   image=$(docker inspect -f '{{.Image}}' "$controller")
+   docker stop "$controller"
+   next_volume=$(docker volume create)
+   docker run --rm --user 0 --entrypoint sh \
+     -v "$original:/source:ro" -v "$next_volume:/target" "$image" -ec 'cp -a /source/. /target/'
+   docker run --rm --user ubuntu --entrypoint bash \
+     -v "$PWD:/workspaces:ro" -v "$next_volume:/home/ubuntu/.hermes" "$image" -ec '
+       cd /workspaces
+       repo=/home/ubuntu/.hermes/hermes-agent
+       old=$(git -C "$repo" rev-parse HEAD)
+       bash .devcontainer/setup-projects.sh --restore-upstream --revision "$old"
+       target=$(cat .devcontainer/hermes-revision)
+       git -C "$repo" fetch origin "$target"
+       git -C "$repo" switch --detach "$target"
+     '
+   export HERMES_HOME_VOLUME="$next_volume"
+   ```
+
+   위 환경 변수를 설정한 호스트 환경에서 운영 devcontainer를 **Rebuild Container**로 기동합니다. `bash .devcontainer/verify-hermes.sh`와 `bash .devcontainer/start-service.sh status`로 확인한 뒤 작업을 재개합니다. 복구할 때는 컨테이너를 중지하고 기록한 운영 설정 Git SHA와 원본 볼륨을 `HERMES_HOME_VOLUME`으로 선택해 리빌드합니다. 전환 후 새 볼륨에 들어온 세션과 카드는 그 볼륨에서 조회할 수 있습니다.
+
+`--restore-upstream`은 설치기가 기록한 파일만 해당 Hermes 커밋의 원본으로 되돌립니다. 관리 파일에 별도 편집이 있으면 경로를 표시하고 적용 전에 멈춥니다. 프로젝트 생성·삭제의 소유권 처리, 읽기 전용 카드의 기본 디스패치 차단과 분해 시점, 로컬 자료 요청 연결에는 코어 패치가 남습니다. 버전을 바꿀 때는 이 경로를 우선 확인합니다.
 
 ### 새 호스트에서 프로젝트 복원
 

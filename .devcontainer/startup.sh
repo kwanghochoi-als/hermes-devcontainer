@@ -1,6 +1,11 @@
 set -euo pipefail
 
-export PATH="$HOME/.local/bin:$PATH"
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+profile_dir=${HERMES_HOME:-"$HOME/.hermes"}
+checkout="$profile_dir/hermes-agent"
+revision=$(<"$here/hermes-revision")
+[[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+export PATH="$checkout/.hermes/bin:$HOME/.local/bin:$PATH"
 
 log()  { printf '\n\033[1;36m[startup]\033[0m %s\n' "$*"; }
 
@@ -11,19 +16,22 @@ log "Codex CLI 설치 확인"
 command -v codex >/dev/null || npm install -g @openai/codex
 codex --version
 
-log "Hermes Agent 설치"
-if ! command -v hermes >/dev/null; then
-  saved_launcher="${HERMES_HOME:-$HOME/.hermes}/hermes-agent/.hermes/bin/hermes"
-  if [[ -x "$saved_launcher" ]]; then
-    mkdir -p "$HOME/.local/bin"
-    ln -s "$saved_launcher" "$HOME/.local/bin/hermes"
-  else
-    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
-  fi
+log "Hermes Agent 설치 버전 확인 · $revision"
+if [[ -e "$checkout" && "$(git -C "$checkout" rev-parse HEAD)" != "$revision" ]]; then
+  echo "영속 볼륨의 Hermes 커밋이 다릅니다. .devcontainer/README.md의 Hermes 버전 변경 절차를 확인하세요." >&2
+  exit 1
+fi
+if [[ ! -x "$checkout/.hermes/bin/hermes" ]]; then
+  curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/$revision/scripts/install.sh" |
+    bash -s -- --non-interactive --commit "$revision" --dir "$checkout" --hermes-home "$profile_dir"
+fi
+if [[ ! -e "$HOME/.local/bin/hermes" ]]; then
+  mkdir -p "$HOME/.local/bin"
+  ln -s "$checkout/.hermes/bin/hermes" "$HOME/.local/bin/hermes"
 fi
 
 log "프로젝트 생성기 연결"
-bash /workspaces/.devcontainer/setup-projects.sh
+bash "$here/setup-projects.sh"
 
 log "Hermes Telegram 어댑터 설치"
 hermes pm install --extra telegram
