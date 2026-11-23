@@ -33,9 +33,14 @@ hermes project-cli board
 hermes kanban --board test-prj list
 hermes kanban --board test-prj show <카드-ID>
 hermes kanban --board test-prj runs <카드-ID>
+hermes kanban --board test-prj log <카드-ID> --run <Run-ID>
 ```
 
 ## 실행과 재개
+
+웹앱은 카드의 **Runs**, 대시보드는 **Run history**에서 시도별 Run ID와 마지막으로 성공한 단계를 보여줍니다. **시도 로그 보기**를 열면 해당 시도의 CLI 실행 이벤트와 표준 오류를 확인할 수 있습니다. 실행 중에는 열린 로그가 자동 갱신됩니다.
+
+CLI에서는 `runs`에 표시된 **Run # 뒤의 숫자**를 `log --run`에 사용합니다. 두 로그에서 각각 최근 64 KiB까지 읽고, 잘린 줄은 생략합니다. CLI 이벤트는 유형·종료 코드·오류 위주로 표시하고 인증 정보는 가립니다. 새 시도에서는 작업 폴더 검증, 컨테이너 시작, CLI 세션 연결, 결과 보고 수신을 기록합니다. Pharmmate에서는 스냅샷 사전 점검과 두 훅의 자가 검사 성공도 기록합니다. 기존 시도에는 당시 Kanban에 기록된 단계만 표시합니다.
 
 - 일반 프로젝트에서 워커는 `codex exec --dangerously-bypass-approvals-and-sandbox` 또는 `claude -p --dangerously-skip-permissions`로 실행합니다. 새 카드와 세션 재개에 같은 옵션을 적용합니다. Pharmmate 관찰 전용 보드는 대화형 승인 없이 원격 `main`의 고정된 커밋만 조회하는 전용 실행기를 사용합니다.
 - 워커는 프로젝트와 CLI마다 인증·세션용 홈을 두고 카드마다 별도 Docker 컨테이너를 실행합니다. 일반 카드에는 선택한 checkout, 연결된 worktree의 공통 Git 메타데이터, 해당 카드의 첨부파일을 연결합니다. 워커에서는 컨트롤러의 Docker 소켓, Hermes DB, 다른 프로젝트 홈에 접근할 수 없습니다. 운영 저장소 자체에 작업을 위임할 때는 `/workspaces`의 별도 Git worktree를 엽니다.

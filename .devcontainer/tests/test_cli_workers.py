@@ -93,6 +93,12 @@ class WorkerRecovery(unittest.TestCase):
                         self.fail("The first CLI did not publish its session ID")
                     time.sleep(0.2)
                 original_id = comment.split()[2]
+                def inspect(*args):
+                    return subprocess.check_output(["hermes", "kanban", "--board", "cli-workers", *args],
+                                                   env=env, text=True)
+                active = json.loads(inspect("runs", first, "--json"))[0]
+                self.assertEqual(active["last_step"], "CLI 세션 연결")
+                self.assertIn("thread.started", inspect("log", first, "--run", str(active["id"])))
                 worker.kill()
                 worker.wait(timeout=10)
                 worker = serve()
@@ -104,6 +110,25 @@ class WorkerRecovery(unittest.TestCase):
                 subprocess.run(["hermes", "kanban", "--board", "cli-workers", "unblock", first],
                                env=env, stdout=subprocess.DEVNULL, check=True)
                 wait_for(first, "done")
+                first_try, retry = json.loads(inspect("runs", first, "--json"))
+                self.assertEqual(first_try["last_step"], "CLI 세션 연결")
+                self.assertEqual(retry["last_step"], "카드 완료 기록")
+                self.assertNotIn("turn.completed", inspect("log", first, "--run", str(first_try["id"])))
+                self.assertIn("turn.completed", inspect("log", first, "--run", str(retry["id"])))
+                run_dir = state / "cli-workers" / "runs" / first / str(first_try["id"])
+                stderr = run_dir / "stderr.log"
+                stderr.write_text("API_KEY=sk-" + "x" * 48 + "\nlast diagnostic\n")
+                log = inspect("log", first, "--run", str(first_try["id"]))
+                self.assertIn("last diagnostic", log)
+                self.assertNotIn("x" * 48, log)
+                stderr.unlink()
+                stderr.symlink_to(root / "unrelated")
+                (root / "unrelated").write_text("private fixture")
+                for task_id in (first, independent):
+                    denied = subprocess.run(["hermes", "kanban", "--board", "cli-workers", "log", task_id,
+                                             "--run", str(first_try["id"])], env=env, capture_output=True, text=True)
+                    self.assertNotEqual(denied.returncode, 0)
+                    self.assertNotIn("private fixture", denied.stdout)
                 meta = query("SELECT metadata FROM task_runs WHERE task_id=? AND outcome='completed'", first)
                 self.assertEqual(json.loads(meta)["cli_session_id"], original_id)
                 other = submit("b", "codex", "Check the other checkout")

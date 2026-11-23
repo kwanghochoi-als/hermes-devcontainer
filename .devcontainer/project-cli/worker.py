@@ -21,7 +21,7 @@ from hermes_constants import get_hermes_home
 
 from .board import (BOARD, LANES, EnvironmentActionRequired, board, knowledge_root, project_dir, project_for_checkout,
                     runtime_limit, worker_boards)
-from . import isolation, knowledge
+from . import attempts, isolation, knowledge
 
 SCHEMA = Path(__file__).with_name("result.schema.json")
 REPORT = """Execute the user's Kanban task within the project's rules. Carry out routine,
@@ -88,7 +88,10 @@ def decode_report(value):
 
 
 class Events:
-    def __init__(self, session_file):
+    def __init__(self, session_file, checkpoint, observer):
+        self.checkpoint = checkpoint
+        self.observer = observer
+        self.session_confirmed = False
         self.file = session_file
         self.session = str(UUID(self.file.read_text().strip())) if self.file.exists() else None
         self.success = False
@@ -118,6 +121,12 @@ class Events:
                     tmp.write_text(value)
                     tmp.replace(self.file)
                     self.session = value
+                if not self.session_confirmed:
+                    self.checkpoint("session")
+                    self.session_confirmed = True
+            elif kind == "observer.checkpoint" and self.observer and not self.session_confirmed:
+                if event.get("step") in ("snapshot", "prompt_hook", "tool_hook"):
+                    self.checkpoint(event["step"])
             elif kind == "item.completed" and event["item"].get("type") == "agent_message":
                 self.report = decode_report(event["item"].get("text"))
             elif kind == "turn.completed":
@@ -163,7 +172,10 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
     session_key = digest(str(cwd), task.session_id or task.id, engine)
     if observer:
         session_key = digest(session_key, task.current_run_id)
-    events = Events(state / "sessions" / session_key)
+    def checkpoint(step):
+        attempts.checkpoint(conn, task, step)
+
+    events = Events(state / "sessions" / session_key, checkpoint, observer)
     run_id = task.current_run_id
     runs = state / "runs" if slug == BOARD else state / "boards" / slug / "runs"
     files = runs / task.id / str(run_id)
@@ -187,13 +199,14 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
                    + json.dumps(references, ensure_ascii=False) + "\n\n" + context)
     with isolation.launch(engine, cli, cwd, project, files, f"{REPORT}\n\n{context}\n",
                           project_lock, events.session, observer, attachments) as proc, log.open("rb") as reader:
+        checkpoint("container")
         started = time.monotonic()
         next_heartbeat = started
         saved_session = False
         while True:
             code = proc.poll()
             events.read(reader, finished=code is not None)
-            if events.session and not saved_session:
+            if events.session_confirmed and not saved_session:
                 kb.add_comment(conn, task.id, "project-cli",
                                f"{engine} session {events.session} · {cwd} · log {log}")
                 saved_session = True
@@ -214,6 +227,7 @@ def execute(conn, task, cwd, state, project_lock, stopping, slug):
         raise EnvironmentActionRequired(f"{events.error}\n{check}\n로그 · {files}")
     if code or not events.session or not events.success or not events.report:
         raise RuntimeError(f"{engine} 종료 코드 {code}. {events.error or '완료 보고를 확인할 수 없습니다.'} 로그 {files}")
+    checkpoint("report")
     report = events.report
     summary = f"{report['summary']}\n\n테스트 · {report['tests']}"
     if report["status"] != "completed":
@@ -326,6 +340,7 @@ def process_card(card_id, lock_fd, slug):
                     raise ValueError("생성한 Git worktree와 보드의 소유 프로젝트가 일치하지 않습니다.")
                 workspaces.set_workspace_path(conn, task.id, workspace)
                 task.workspace_path = str(workspace)
+            attempts.checkpoint(conn, task, "workspace")
             execute(conn, task, workspace, state, lock, stopping, slug)
         except Exception as exc:
             kind = "transient" if isinstance(exc, InterruptedError) else "capability"

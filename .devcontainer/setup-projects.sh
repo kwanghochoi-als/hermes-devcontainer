@@ -27,3 +27,4 @@ apply_files hermes-projects.patch
 apply_files hermes-project-delete.patch
 apply_files hermes-telegram.patch
 apply_files hermes-block-request.patch
+apply_files hermes-attempt-logs.patch

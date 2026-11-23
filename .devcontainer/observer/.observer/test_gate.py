@@ -149,7 +149,8 @@ class ObserverTest(unittest.TestCase):
                 redirect_stdout(StringIO()) as out, redirect_stderr(StringIO()), self.assertRaises(SystemExit) as exit_:
             runpy.run_path(str(script), run_name='__main__')
         self.assertNotEqual(exit_.exception.code, 0)
-        event = json.loads(out.getvalue())
+        *steps, event = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([s["step"] for s in steps], ["snapshot", "prompt_hook"])
         self.assertEqual(event['type'], 'turn.failed')
         self.assertIn('PreToolUse', event['error']['message'])
         submit.assert_not_called()

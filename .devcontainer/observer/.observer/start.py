@@ -15,6 +15,10 @@ os.chdir(ROOT)
 agent = sys.argv[1]
 args = (['codex','exec','--strict-config','--skip-git-repo-check','--ephemeral','--sandbox','read-only','-c','approval_policy="never"'] if agent=='codex' else ['claude','-p','--settings',str(ROOT/'.claude/settings.json'),'--strict-mcp-config','--permission-mode','dontAsk','--tools','Bash','--no-session-persistence'])
 
+def checkpoint(step):
+    if worker:
+        print(json.dumps({"type": "observer.checkpoint", "step": step}), flush=True)
+
 def blocked(reason, code=1):
     message = f'BLOCKED: {reason}'
     if worker:
@@ -43,6 +47,7 @@ env.pop('PHARMMATE_OBSERVER_RECEIPT',None)
 pre = subprocess.run(['/usr/bin/python3','-I','-B',str(gate)], input=json.dumps({'session_id':'launcher-'+secrets.token_hex(16),'hook_event_name':'UserPromptSubmit'}), text=True, env=env,stdout=subprocess.DEVNULL)
 if pre.returncode:
     blocked('원격 main 스냅샷을 확인할 수 없습니다.', pre.returncode)
+checkpoint("snapshot")
 # A skipped/untrusted hook must not be mistaken for success even if the CLI exits 0.
 with tempfile.TemporaryDirectory(prefix='pharmmate-probe-') as directory:
     for prefix, event, prompt, timeout in [
@@ -62,6 +67,7 @@ with tempfile.TemporaryDirectory(prefix='pharmmate-probe-') as directory:
         proof = Path(directory) / nonce
         if not proof.is_file() or proof.read_text() != event:
             blocked(f'{event} 훅 자가 검사에서 실행을 확인할 수 없습니다 (CLI 종료 코드 {result.returncode}).')
+        checkpoint("tool_hook" if prefix else "prompt_hook")
 # Real prompt invokes the same UserPromptSubmit gate without the probe nonce.
 if worker:
     schema=Path(sys.argv[3]).resolve(strict=True)

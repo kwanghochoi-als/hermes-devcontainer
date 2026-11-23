@@ -15,7 +15,8 @@ POLICY_FILES = ("AGENTS.md", "CLAUDE.md", ".claude/settings.json", ".codex/confi
                 ".observer/sources.json")
 PREVIOUS = {
     "AGENTS.md": {"8b5387e48af5b18a1523e4237b394a76ad01899b952707499d2f5b9049945f04"},
-    ".observer/start.py": {"ca43ba226b8a4dc876612952341f98c6ab9bee93d4af98ddf74656a01f2f08a8",
+    ".observer/start.py": {"ac26a063bc2556cf1e220bba9c41112e03c66f9ed8ac048ca373909a8d2f5235",
+                           "ca43ba226b8a4dc876612952341f98c6ab9bee93d4af98ddf74656a01f2f08a8",
                            "96c405306af7ffdf8e54af3d45bb5b72f1dba26e9a9dd7e7b485b73a3d2f2ac8"},
     ".observer/gate.py": {"13783d7f4ae916cf77ab39783c1c48c878cbd3d067d0775df2976a0a95e239ac",
                           "b4a07e25675d73f9a6f846b95eb402ccb8a864f572c8fcff044610f54e31c3fc"},

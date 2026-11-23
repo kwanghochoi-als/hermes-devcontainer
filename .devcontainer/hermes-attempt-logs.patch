@@ -1,0 +1,285 @@
+diff --git a/apps/desktop/src/plugins/kanban/api.ts b/apps/desktop/src/plugins/kanban/api.ts
+index 40340405d0..64aca6d7f9 100644
+--- a/apps/desktop/src/plugins/kanban/api.ts
++++ b/apps/desktop/src/plugins/kanban/api.ts
+@@ -438,6 +438,13 @@ export const fetchTask = async (id: string) => {
+ /** Worker stdout/stderr tail (last 16 KiB — plenty for the drawer). */
+ export const fetchLog = (id: string) => call<WorkerLog>(withBoard(`/tasks/${id}/log`, { tail: '16384' }))
+ 
++export const fetchAttemptLog = (slug: string, id: string, run: string | number) => {
++  const path = `/tasks/${encodeURIComponent(id)}/runs/${encodeURIComponent(String(run))}/log`
++  return call<{ content: string; truncated: boolean; last_step: string }>(
++    slug ? `${path}?board=${encodeURIComponent(slug)}` : path
++  )
++}
++
+ export const fetchBoards = () => call<BoardsResponse>('/boards')
+ 
+ export const fetchProfiles = () => call<{ profiles: KanbanProfile[] }>('/profiles')
+diff --git a/apps/desktop/src/plugins/kanban/drawer.test.tsx b/apps/desktop/src/plugins/kanban/drawer.test.tsx
+index d627664d7f..68045b00ee 100644
+--- a/apps/desktop/src/plugins/kanban/drawer.test.tsx
++++ b/apps/desktop/src/plugins/kanban/drawer.test.tsx
+@@ -52,6 +52,10 @@ const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<un
+     return { exists: false, content: '', size_bytes: 0, truncated: false }
+   }
+ 
++  if (path === '/tasks/t_example/runs/42/log?board=example') {
++    return { content: 'stderr from attempt 42', last_step: 'CLI 세션 연결', truncated: false }
++  }
++
+   if (path === '/profiles') {
+     return { profiles: [] }
+   }
+@@ -254,6 +258,16 @@ describe('task modal dialog', () => {
+     expect(onClose).toHaveBeenCalledOnce()
+   })
+ 
++  it('opens the selected attempt on the board that returned its history', async () => {
++    detail = { ...legacyDetail, runs: [{ id: 42, profile: 'cli:codex', outcome: 'blocked', status: 'blocked',
++      last_step: 'CLI 세션 연결', log_board: 'example', ended_at: 1 }] }
++    openDrawer()
++    fireEvent.click(await screen.findByText(en.runs(1)))
++    expect(screen.getByText(/Run #42 · 마지막 성공 단계 · CLI 세션 연결/)).toBeTruthy()
++    fireEvent.click(screen.getByRole('button', { name: '시도 로그 보기' }))
++    expect(await screen.findByText('stderr from attempt 42')).toBeTruthy()
++  })
++
+   it('posts a comment from the named icon action in the field', async () => {
+     detail = { ...legacyDetail, attachments: [] }
+     openDrawer()
+diff --git a/apps/desktop/src/plugins/kanban/drawer.tsx b/apps/desktop/src/plugins/kanban/drawer.tsx
+index d5e8043515..864e2f10d3 100644
+--- a/apps/desktop/src/plugins/kanban/drawer.tsx
++++ b/apps/desktop/src/plugins/kanban/drawer.tsx
+@@ -44,6 +44,7 @@ import {
+   boardKeyPrefix,
+   deleteTask,
+   estimateTask,
++  fetchAttemptLog,
+   fetchLog,
+   fetchProfiles,
+   fetchTask,
+@@ -682,6 +683,30 @@ function LinkChips({
+   )
+ }
+ 
++function AttemptLog({ board, task, run, lastStep, live }: { board?: string | null; task: string; run: string | number; lastStep: string; live: boolean }) {
++  const scope = useKanbanScope()
++  const selected = useValue($boardSlug)
++  const slug = board || selected
++  const [open, setOpen] = useState(false)
++  const log = useQuery({
++    queryKey: [...logKey(scope, slug, task), run],
++    queryFn: () => fetchAttemptLog(slug, task, run),
++    enabled: query => open && routedToScope(query),
++    refetchInterval: open && live ? 3_000 : false
++  })
++
++  return (
++    <div>
++      <div>Run #{run} · 마지막 성공 단계 · {open && log.data ? log.data.last_step : lastStep}</div>
++      <button type="button" className="underline" aria-expanded={open} onClick={() => setOpen(!open)}>
++        {open ? '로그 닫기' : '시도 로그 보기'}
++      </button>
++      {open && <LogView>{log.error ? errText(log.error) : log.data
++        ? (log.data.truncated ? '(최근 로그, 잘린 줄 생략)\n' : '') + log.data.content : '불러오는 중…'}</LogView>}
++    </div>
++  )
++}
++
+ /** The main column's feed: Comments (default) / Activity / Runs / Worker log,
+  *  selected Jira-style with a segmented control ("Activity ▸ Show: …"). The
+  *  control hides itself when only comments exist — nothing to switch to. */
+@@ -786,6 +811,9 @@ function FeedTabs({
+                       {ago(run.ended_at ?? run.started_at)}
+                     </span>
+                   </div>
++                  {run.last_step && (
++                    <AttemptLog board={run.log_board} task={detail.task.id} run={run.id} lastStep={run.last_step} live={!run.ended_at} />
++                  )}
+                   {(run.error || run.summary) && (
+                     <p
+                       className={cn(
+diff --git a/apps/desktop/src/plugins/kanban/types.ts b/apps/desktop/src/plugins/kanban/types.ts
+index 0b8735d4b5..982e4fad86 100644
+--- a/apps/desktop/src/plugins/kanban/types.ts
++++ b/apps/desktop/src/plugins/kanban/types.ts
+@@ -70,6 +70,8 @@ export interface Diagnostic {
+ }
+ 
+ export interface KanbanRun {
++  last_step?: string
++  log_board?: string | null
+   id: number | string
+   profile?: null | string
+   status: string
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+index 69a40b1850..c7b500c763 100644
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -1227,6 +1227,19 @@ def _cmd_notify_unsubscribe(args: argparse.Namespace) -> int:
+ 
+ 
+ def _cmd_log(args: argparse.Namespace) -> int:
++    if getattr(args, "run", None) is not None:
++        from hermes_cli.workspace_projects import attempts
++        try:
++            with kbc.connect_closing() as conn:
++                log = attempts.read_log(conn, attempts.log_board(conn), args.task_id, args.run,
++                                        attempts.TAIL_LIMIT if args.tail is None else args.tail)
++        except (LookupError, OSError, ValueError) as exc:
++            return _err(str(exc))
++        print(f"Run #{log['run_id']} · 마지막 성공 단계 · {log['last_step']}")
++        if log["truncated"]:
++            print("(최근 로그, 잘린 줄 생략)")
++        print(log["content"])
++        return 0
+     content = kb.read_worker_log(args.task_id, tail_bytes=args.tail)
+     if content is None:
+         return _err(f"(no log for {args.task_id} — task may not have spawned yet)")
+@@ -1243,7 +1256,13 @@ def _cmd_runs(args: argparse.Namespace) -> int:
+         return rc
+     with kbc.connect_closing() as conn:
+         runs = kb.list_runs(conn, args.task_id, **rsk)
+-    if _json_out(args, [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs]):
++        from hermes_cli.workspace_projects import attempts
++        stages = attempts.last_steps(conn, args.task_id)
++    rows = [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs]
++    for row, run in zip(rows, runs):
++        if run.profile in attempts.LANES:
++            row["last_step"] = attempts.last_step(run, stages)
++    if _json_out(args, rows):
+         return 0
+     if not runs:
+         print(f"(no runs yet for {args.task_id})")
+@@ -1256,6 +1275,8 @@ def _cmd_runs(args: argparse.Namespace) -> int:
+         el = f"{elapsed}s" if elapsed < 60 else f"{elapsed // 60}m" if elapsed < 3600 else f"{elapsed / 3600:.1f}h"
+         outcome = r.outcome or ("(running)" if not r.ended_at else r.status)
+         print(f"{i:3d}  {outcome:12s}  {(r.profile or '-'):16s}  {el:>8s}  {_fmt_ts(r.started_at)}")
++        if r.profile in attempts.LANES:
++            print(f"     Run #{r.id} · 마지막 성공 단계 · {attempts.last_step(r, stages)}")
+         if r.summary:
+             print(f"     → {r.summary.splitlines()[0][:100]}")
+         if r.error:
+diff --git a/hermes_cli/kanban_parser.py b/hermes_cli/kanban_parser.py
+index 8a65d41346..56511f89fe 100644
+--- a/hermes_cli/kanban_parser.py
++++ b/hermes_cli/kanban_parser.py
+@@ -413,7 +413,8 @@ _SPECS = [
+     _cmd("notify-list", [_arg("task_id", nargs="?"), _json_flag()],
+          help="List notification subscriptions (optionally for a single task)"),
+     _cmd("notify-unsubscribe", [_TASK_ID, *_NOTIFY_TARGET], help="Remove a gateway subscription from a task"),
+-    _cmd("log", [_TASK_ID, _arg("--tail", type=int, help="Only print the last N bytes")],
++    _cmd("log", [_TASK_ID, _arg("--run", type=int, help="Show this project CLI run ID (see runs)"),
++                 _arg("--tail", type=int, help="Only print the last N bytes")],
+          help="Print the worker log for a task (from <kanban-root>/kanban/logs/)"),
+     _cmd("runs", [_TASK_ID, _json_flag(), *_run_state_args("filter runs by task_runs column")],
+          help="Show attempt history for a task (one row per run: profile, outcome, elapsed, summary)"),
+diff --git a/plugins/kanban/dashboard/dist/index.js b/plugins/kanban/dashboard/dist/index.js
+index 658ae11c5b..47247cce6a 100644
+--- a/plugins/kanban/dashboard/dist/index.js
++++ b/plugins/kanban/dashboard/dist/index.js
+@@ -4200,7 +4200,7 @@
+         }),
+       ),
+       h(WorkerLogSection, { taskId: t.id, boardSlug: props.boardSlug }),
+-      h(RunHistorySection, { runs: props.data.runs || [] }),
++      h(RunHistorySection, { runs: props.data.runs || [], taskId: t.id, boardSlug: props.boardSlug }),
+     );
+   }
+ 
+@@ -4251,6 +4251,8 @@
+             h("span", { className: "hermes-kanban-run-ago" },
+               timeAgo ? timeAgo(r.started_at) : ""),
+           ),
++          r.last_step ? h(AttemptLog, { key: JSON.stringify([r.log_board || props.boardSlug, props.taskId, r.id]),
++            board: r.log_board || props.boardSlug, task: props.taskId, run: r }) : null,
+           r.summary
+             ? h("div", { className: "hermes-kanban-run-summary" }, r.summary)
+             : null,
+@@ -4275,6 +4277,35 @@
+     );
+   }
+ 
++  function AttemptLog({ board, task, run }) {
++    const [open, setOpen] = useState(false);
++    const [data, setData] = useState(null);
++    const [error, setError] = useState(null);
++    useEffect(function () {
++      if (!open) return;
++      let active = true;
++      let timer;
++      async function load() {
++        try {
++          const path = `${API}/tasks/${encodeURIComponent(task)}/runs/${encodeURIComponent(run.id)}/log`;
++          const result = await SDK.fetchJSON(withBoard(path, board));
++          if (active) { setData(result); setError(null); }
++        } catch (e) {
++          if (active) setError(String(e.message || e));
++        }
++        if (active && !run.ended_at) timer = setTimeout(load, 3000);
++      }
++      load();
++      return function () { active = false; clearTimeout(timer); };
++    }, [open, board, task, run.id, run.ended_at]);
++    return h("div", null,
++      h("div", null, `Run #${run.id} · 마지막 성공 단계 · ${open && data ? data.last_step : run.last_step}`),
++      h("button", { type: "button", className: "hermes-kanban-edit-link", "aria-expanded": open,
++        onClick: () => setOpen(!open) }, open ? "로그 닫기" : "시도 로그 보기"),
++      open ? h("pre", { className: "hermes-kanban-pre hermes-kanban-log" },
++        error || (data ? (data.truncated ? "(최근 로그, 잘린 줄 생략)\n" : "") + data.content : "불러오는 중…")) : null);
++  }
++
+   // Worker log: loads lazily (one GET on mount), refresh button, tail cap.
+   function WorkerLogSection(props) {
+     const { t } = useI18n();
+diff --git a/plugins/kanban/dashboard/plugin_api.py b/plugins/kanban/dashboard/plugin_api.py
+index a572f7c06c..ad7b355e13 100644
+--- a/plugins/kanban/dashboard/plugin_api.py
++++ b/plugins/kanban/dashboard/plugin_api.py
+@@ -391,6 +391,16 @@ def get_task(
+             task, latest_summary=kanban_db.latest_summary(conn, task_id),
+             current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
+         links = _links_for(conn, task_id)
++        from hermes_cli.workspace_projects import attempts
++        log_board = attempts.log_board(conn)
++        stages = attempts.last_steps(conn, task_id)
++        runs = []
++        for run in kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name):
++            row = asdict(run)
++            if run.profile in attempts.LANES:
++                row["last_step"] = attempts.last_step(run, stages)
++                row["log_board"] = log_board
++            runs.append(row)
+         child_summaries = kanban_db.latest_summaries(conn, links["children"])
+         children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
+         _attach_diagnostics(task_d, _compute_task_diagnostics(conn, task_ids=[task_id]).get(task_id) or [])
+@@ -404,7 +414,7 @@ def get_task(
+             "child_results": [
+                 {"id": c.id, "title": c.title, "status": c.status, "latest_summary": child_summaries.get(c.id), "result": c.result}
+                 for c in children],
+-            "runs": [asdict(r) for r in kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name)]}
++            "runs": runs}
+ 
+ 
+ # --- POST /tasks ------------------------------------------------------------
+@@ -1250,6 +1260,18 @@ def get_assignees(board: Optional[str] = Query(None)):
+         return {"assignees": kanban_db.known_assignees(conn)}
+ 
+ 
++@router.get("/tasks/{task_id}/runs/{run_id}/log")
++def get_cli_attempt_log(task_id: str, run_id: int, board: Optional[str] = _BOARD_Q):
++    from hermes_cli.workspace_projects.attempts import log_board, read_log
++    with _board_conn(board) as (slug, conn):
++        try:
++            return read_log(conn, slug or log_board(conn), task_id, run_id)
++        except LookupError:
++            raise HTTPException(status_code=404, detail="CLI attempt not found") from None
++        except (OSError, ValueError):
++            raise HTTPException(status_code=409, detail="이 시도의 로그를 열 수 없습니다.") from None
++
++
+ @router.get("/tasks/{task_id}/log")
+ def get_task_log(task_id: str, tail: Optional[int] = Query(None, ge=1, le=2_000_000), board: Optional[str] = Query(None)):
+     """Worker stdout/stderr log. ``tail`` caps the response bytes; 404 if the
