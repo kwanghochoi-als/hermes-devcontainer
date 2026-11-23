@@ -84,21 +84,12 @@ def search_scope(cwd=None, *, all_projects=False):
     return [collection_name(knowledge_root(project_dir(cwd)))]
 
 
-def scope_query(tool_name="", args=None, session_id="", **kwargs):
+def scope_query(tool_name="", args=None, session_id="", cwd=None, **kwargs):
     if tool_name != "mcp__qmd__query":
         return
     selected = (args or {}).get("collections")
     if selected and selected != ["*"]:
         return
-    from agent.runtime_cwd import scoped_session_cwd
-    cwd = scoped_session_cwd()
-    if not cwd and session_id:
-        from hermes_state import SessionDB
-        db = SessionDB()
-        try:
-            cwd = (db.get_session(session_id) or {}).get("cwd")
-        finally:
-            db.close()
     return {"action": "modify", "args": {"collections": search_scope(cwd, all_projects=selected == ["*"])}}
 
 
@@ -112,8 +103,12 @@ def write_note(directory, row, meta, slug):
              f"- 보드 · {slug}", f"- 카드 · {card} / 실행 {run} / {LANES[row['profile']]}"]
     if meta.get("head"):
         lines.append(f"- Git HEAD · {meta['head']}")
+    pin = meta.get("source_snapshot")
+    if isinstance(pin, dict) and re.fullmatch(r"t_[a-zA-Z0-9_-]+", str(pin.get("card", ""))):
+        lines.append(f"- 상위 카드 · {pin['card']}")
     for repo, sha in sorted(meta.get("source_commits", {}).items()):
-        lines.append(f"- 원격 main · {repo} · {sha}")
+        label = "로컬 HEAD" if repo in meta.get("local_sources", []) else "원격 main"
+        lines.append(f"- {label} · {repo} · {sha}")
     if meta.get("knowledge"):
         lines += ["", "## 확인한 사실", ""]
     for item in meta.get("knowledge", []):
@@ -128,14 +123,13 @@ def write_note(directory, row, meta, slug):
     return filename
 
 
-def read_revisions(path, session):
-    from .git_auth import REPOS
+def read_revisions(path, session, expected):
     receipt = json.loads(path.read_text())
     commits = receipt.get("repositories", {})
-    if (not session or receipt.get("session_id") != session or not isinstance(commits, dict) or set(commits) != set(REPOS)
+    if (not session or receipt.get("session_id") != session or not isinstance(commits, dict) or not expected or commits != expected
             or not all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v)
                        for v in commits.values())):
-        raise ValueError("관찰 세션의 원격 커밋 증명을 확인할 수 없습니다.")
+        raise ValueError("관찰 세션의 커밋 증명을 확인할 수 없습니다.")
     return commits
 
 

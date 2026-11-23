@@ -1,5 +1,6 @@
 import os
 from contextlib import closing, contextmanager
+from functools import lru_cache
 from pathlib import Path
 import subprocess
 
@@ -62,6 +63,23 @@ def project_for_checkout(path):
         return project
 
 
+def path_owners(conn):
+    folders = {}
+    for path, pid in conn.execute("SELECT path, project_id FROM project_folders"):
+        folders.setdefault(Path(path), set()).add(pid)
+
+    @lru_cache(maxsize=512)
+    def owners(path):
+        if path:
+            p = Path(path)
+            for parent in (p, *p.parents):
+                if parent in folders:
+                    return folders[parent]
+        return set()
+
+    return owners
+
+
 def knowledge_root(path):
     project = project_for_checkout(path)
     return Path(project.primary_path) if project and project.primary_path else path
@@ -100,9 +118,11 @@ def project_dir(path):
     return cwd
 
 
-def enqueue(engine, prompt, cwd, session_id=None, *, key=None):
+def enqueue(engine, prompt, cwd, session_id=None, *, key=None, parents=()):
     if engine not in ENGINES or not prompt.strip():
         raise ValueError("작업자와 작업 지시가 필요합니다.")
+    if not isinstance(parents, (list, tuple)) or not all(isinstance(p, str) and p for p in parents):
+        raise ValueError("상위 카드 ID 목록을 지정하세요.")
     path = project_dir(cwd)
     slug = board_for_checkout(path)
     with kb.scoped_current_board(slug), board(slug) as conn:
@@ -110,7 +130,7 @@ def enqueue(engine, prompt, cwd, session_id=None, *, key=None):
             conn, board=slug, title=prompt.strip().splitlines()[0][:120], body=prompt,
             assignee=f"cli:{engine}", created_by="project-cli",
             workspace_kind="dir", workspace_path=str(path), session_id=session_id or None,
-            max_retries=1, max_runtime_seconds=runtime_limit(), idempotency_key=key,
+            max_retries=1, max_runtime_seconds=runtime_limit(), idempotency_key=key, parents=tuple(parents),
         )
         if session_id:
             # Follow Hermes' own notification settings and authenticated calling route.

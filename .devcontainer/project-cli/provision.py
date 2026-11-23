@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import fcntl
 from functools import wraps
 import os
+import json
 from pathlib import Path
 import subprocess
 
@@ -14,6 +15,7 @@ from persistence.conversation.sessions import sanitize_title
 
 from .board import BOARD
 from .knowledge import register_collection
+from .observer import creation_sources, remember_origins
 
 
 def workspace_root():
@@ -115,13 +117,17 @@ def starter_session(conn, sessions, project, path, title, collection, sid):
 
 def workspace_creator(native_create):
     @wraps(native_create)
-    def create(conn, *, name, folders=None, primary_path=None, **options):
+    def create(conn, *, name, folders=None, primary_path=None, readonly=None, sources=None, **options):
         from hermes_cli import projects_db as pdb
         from .removal import default_board_for_new_project
 
         name = str(name or "").strip()
         if not name:
             raise ValueError("프로젝트 이름을 입력하세요.")
+        if readonly is not None and not isinstance(readonly, bool):
+            raise ValueError("readonly 값은 boolean이어야 합니다.")
+        if sources and not readonly:
+            raise ValueError("--source는 읽기 전용 프로젝트에 사용하세요.")
         folders = list(folders or ())
         root = workspace_root()
         selected = primary_path or next(iter(folders), None)
@@ -129,7 +135,7 @@ def workspace_creator(native_create):
             raise ValueError("프로젝트 폴더에 사용할 수 있는 이름을 입력하세요.")
         path = Path(selected or root / name).expanduser().resolve()
         if path == root or not path.is_relative_to(root) or options.get("allow_duplicate_path"):
-            if not selected:
+            if readonly or not selected:
                 raise ValueError(f"프로젝트 폴더는 {root} 안에 있어야 합니다.")
             return native_create(conn, name=name, folders=folders, primary_path=primary_path, **options)
 
@@ -164,10 +170,26 @@ def workspace_creator(native_create):
             if other_binding or meta["archived"] or other_owner or existing_board or retired:
                 raise ValueError(f"이미 사용 중인 Kanban 보드입니다 · {board_name}")
             existing_sid = existing_session(conn, sessions, old, path, title)
-            git_repo(path, root)
-            if path == root / "pharmmate":
-                from .layout import install_observer
-                install_observer(path)
+            remote_checkouts = set()
+            if old and readonly is True and not old.readonly:
+                raise ValueError("기존 일반 프로젝트입니다. 읽기 전용 프로젝트를 별도 폴더에 생성하세요.")
+            if old and old.readonly:
+                if sources:
+                    requested = creation_sources(path, folders, sources)
+                    if not requested.items() <= json.loads(old.observer_sources).items():
+                        raise ValueError("기존 관찰 프로젝트와 소스 목록이 다릅니다.")
+            elif readonly:
+                policy = creation_sources(path, folders, sources, remote_checkouts=remote_checkouts)
+                if not sources and (not path.exists() or not any(path.iterdir())):
+                    git_repo(path, root)
+                else:
+                    path.mkdir(parents=True, exist_ok=True)
+                for source in policy.values():
+                    if source.startswith("/") and not (Path(source) / ".git").exists():
+                        raise ValueError(f"Git 저장소 폴더를 선택하거나 --source로 원격을 등록하세요 · {source}")
+                options["observer_sources"] = json.dumps(policy)
+            else:
+                git_repo(path, root)
             try:
                 collection = register_collection(path)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -175,6 +197,9 @@ def workspace_creator(native_create):
             if not old:
                 options.update(slug=slug, board_slug=board_name)
                 pid = native_create(conn, name=name, folders=folders, primary_path=str(path), **options)
+                if remote_checkouts:
+                    with pdb.write_txn(conn):
+                        remember_origins(conn, pid, remote_checkouts)
             else:
                 pid = old.id
                 if not old.primary_path:

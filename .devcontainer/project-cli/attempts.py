@@ -15,17 +15,17 @@ from .board import BOARD, LANES
 TAIL_LIMIT = 65536
 STEPS = {
     "workspace": "작업 폴더 검증", "container": "워커 컨테이너 시작",
-    "snapshot": "원격 스냅샷 사전 점검", "prompt_hook": "요청 훅 자가 검사",
+    "source_pin": "상위 작업의 Git 커밋 확정", "snapshot": "관찰 스냅샷 사전 점검", "prompt_hook": "요청 훅 자가 검사",
     "tool_hook": "도구 훅 자가 검사", "session": "CLI 세션 연결",
     "report": "CLI 결과 보고 수신",
 }
 
 
-def checkpoint(conn, task, step):
+def checkpoint(conn, task, step, **details):
     with kb.write_txn(conn):
         if conn.execute("SELECT 1 FROM tasks WHERE id=? AND current_run_id=? AND status='running'",
                         (task.id, task.current_run_id)).fetchone():
-            kb._append_event(conn, task.id, "cli_checkpoint", {"step": step}, run_id=task.current_run_id)
+            kb._append_event(conn, task.id, "cli_checkpoint", {"step": step, **details}, run_id=task.current_run_id)
 
 
 def last_steps(conn, task_id):

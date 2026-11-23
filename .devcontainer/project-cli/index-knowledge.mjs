@@ -34,7 +34,7 @@ async function recallNotes(store, query, remoteEmbedding, extractSnippet) {
       const { header, facts } = noteParts(hit.body);
       // Match findings, or the pinned revisions of a provenance-only note.
       // Shared headers also contain boilerplate such as the project name.
-      const text = sourceId ? header + facts : facts || (header.match(/^- (?:Git HEAD|원격 main) · .+$/gm) ?? []).join('\n');
+      const text = sourceId ? header + facts : facts || (header.match(/^- (?:Git HEAD|원격 main|로컬 HEAD) · .+$/gm) ?? []).join('\n');
       if (text.toLowerCase().includes(term)) add(hit, hit.score);
     }
   }
@@ -54,9 +54,9 @@ async function recallNotes(store, query, remoteEmbedding, extractSnippet) {
   for (const { hit } of [...ranked.values()].sort((a, b) => b.score - a.score)) {
     const { header, facts, offset } = noteParts(hit.body);
     const source = header.split('\n')
-      .filter(line => /^- (완료|보드|카드|Git HEAD|원격 main) · /.test(line))
+      .filter(line => /^- (완료|보드|카드|상위 카드|Git HEAD|원격 main|로컬 HEAD) · /.test(line))
       .slice(0, 10).map(line => line.slice(2, 200));
-    if (!facts.trim() && !source.some(line => /^(Git HEAD|원격 main) · /.test(line))) continue;
+    if (!facts.trim() && !source.some(line => /^(Git HEAD|원격 main|로컬 HEAD) · /.test(line))) continue;
     const excerpt = facts.length <= excerptLimit ? facts.trim()
       : extractSnippet(facts, query, excerptLimit, Math.max(0, (hit.chunkPos ?? 0) - offset)).snippet;
     references.push({ document: hit.filepath, source, excerpt });

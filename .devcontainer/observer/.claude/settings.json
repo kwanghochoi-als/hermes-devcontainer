@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 -I -B /workspaces/pharmmate/.observer/gate.py",
+            "command": "/usr/bin/python3 -I -B /opt/hermes-observer/.observer/gate.py",
             "timeout": 120
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 -I -B /workspaces/pharmmate/.observer/gate.py",
+            "command": "/usr/bin/python3 -I -B /opt/hermes-observer/.observer/gate.py",
             "timeout": 120
           }
         ]

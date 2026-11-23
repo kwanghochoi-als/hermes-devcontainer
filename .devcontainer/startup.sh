@@ -48,4 +48,8 @@ bash /workspaces/.devcontainer/setup-qmd.sh
 
 log "Hermes Kanban CLI 워커 등록"
 bash /workspaces/.devcontainer/start-service.sh configure
+log "새 워커의 observer 마운트와 훅 경로 확인"
+if ! hermes project-cli observer-check; then
+  log "Observer 점검 실패 · Docker와 작업 폴더 연결을 확인한 후 hermes project-cli observer-check 로 재확인하세요."
+fi
 log "완료 — 남은 수동 단계는 .devcontainer/README.md 참고"

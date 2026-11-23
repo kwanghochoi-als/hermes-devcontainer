@@ -1,0 +1,10 @@
+{
+  "pharmmate": {
+    "pharmmate": "https://github.com/alssolution/pharmmate.git",
+    "pharmmate-als": "https://github.com/alssolution/pharmmate-als.git",
+    "gitops-als": "https://github.com/alssolution/gitops-als.git",
+    "infra-als": "https://github.com/alssolution/infra-als.git",
+    "jenkins-als": "https://github.com/alssolution/jenkins-als.git",
+    "jenkins-lib": "https://github.com/alssolution/jenkins-lib.git"
+  }
+}

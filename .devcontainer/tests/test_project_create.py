@@ -210,9 +210,13 @@ class ProjectCreation(unittest.TestCase):
                 wait_card("test-prj", queued, "done")
 
                 run("hermes", "project-cli", "restore", "pharmmate")
-                policy = projects / "pharmmate/.observer"
-                self.assertTrue((policy / "start.py").is_symlink())
-                self.assertIn("pharmmate", json.loads((policy / "sources.json").read_text()))
+                self.assertFalse((projects / "pharmmate/.observer").exists())
+                policies = lambda slug: rows(home / "projects.db", "SELECT observer_sources FROM projects WHERE slug=?", slug)[0][0]
+                self.assertEqual(len(json.loads(policies("pharmmate"))), 6)
+                self.assertIsNone(policies("test-prj"))
+                run("hermes", "project", "create", "inspector", "--readonly")
+                run("hermes", "project", "create", "inspector")
+                self.assertEqual(json.loads(policies("inspector")), {"inspector": str(projects / "inspector")})
                 self.assertFalse((projects / "pharmmate/pharmmate").exists())
                 # Route both inventory origins to a fixture without changing their stored URLs.
                 mirrors = root / "fixture-mirrors"

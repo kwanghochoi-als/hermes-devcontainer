@@ -2,7 +2,6 @@
 
 from contextlib import closing, ExitStack
 import fcntl
-from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
@@ -16,7 +15,7 @@ from hermes_cli import kanban_db as kb, projects_db as pdb
 from hermes_cli.kanban_db_connect import connect
 from hermes_constants import get_hermes_home
 
-from .board import BOARD, LANES
+from .board import BOARD, LANES, path_owners
 from .knowledge import collection_lock, collection_name, index_collection
 
 
@@ -28,23 +27,6 @@ def default_board_for_new_project(conn, slug):
         suffix = f"-{generation}"
         name = slug[:64 - len(suffix)] + suffix
     return name
-
-
-def path_owners(conn):
-    folders = {}
-    for path, pid in conn.execute("SELECT path, project_id FROM project_folders"):
-        folders.setdefault(Path(path), set()).add(pid)
-
-    @lru_cache(maxsize=512)
-    def owners(path):
-        if path:
-            p = Path(path)
-            for parent in (p, *p.parents):
-                if parent in folders:
-                    return folders[parent]
-        return set()
-
-    return owners
 
 
 def session_plan(conn, project, home, sessions, owners):
@@ -286,6 +268,7 @@ def remove_owned_data(conn, project_id):
                 forget_telegram(slugs, set().union(*plan.values()))
                 delete_sessions(store, plan, home)
 
+            remove_artifact(checked_path(home, "git-auth", project.id))
             for path in paths:
                 key = hashlib.sha256(path.encode()).hexdigest()
                 remove_artifact(checked_path(home, "cli-workers", "homes", key))
@@ -300,8 +283,8 @@ def remove_owned_data(conn, project_id):
                 delete_board_files(directory)
             for path in linked:
                 pdb._upsert_meta_locked(conn, "project-cli.hidden-root." + path, path)
-            conn.execute("DELETE FROM project_meta WHERE key=? OR key GLOB ? OR (key='active_id' AND value=?)",
-                         (f"project-cli.session.{project_id}", knowledge_keys, project_id))
+            conn.execute("DELETE FROM project_meta WHERE key IN (?,?) OR key GLOB ? OR (key='active_id' AND value=?)",
+                         (f"project-cli.session.{project_id}", f"project-cli.remote-checkouts.{project_id}", knowledge_keys, project_id))
             conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
     return True
 

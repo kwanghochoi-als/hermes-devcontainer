@@ -1,6 +1,8 @@
 """Hermes entry points for the two project CLI workers."""
 
 import json
+import os
+import sqlite3
 from pathlib import Path
 
 from agent.runtime_cwd import resolve_agent_cwd, scoped_session_cwd
@@ -9,8 +11,17 @@ from gateway.session_context import get_session_env
 from .board import BOARD, ENGINES, board_for_checkout, enqueue, knowledge_root, project_dir
 
 
-def session_directory(platform):
-    if path := scoped_session_cwd():
+def bound_directory(session_id):
+    path = scoped_session_cwd()
+    if not path and session_id:
+        from hermes_state import SessionDB
+        with SessionDB() as sessions:
+            path = (sessions.get_session(session_id) or {}).get("cwd")
+    return path
+
+
+def session_directory(platform, session_id=None):
+    if path := bound_directory(session_id):
         return path
     if platform in ("", "cli", "local", "tui", "desktop"):
         return resolve_agent_cwd()
@@ -18,10 +29,18 @@ def session_directory(platform):
 
 
 def slash(engine, prompt, session_id, platform):
+    parents = []
+    prompt = prompt.strip()
+    while prompt.split(None, 1)[:1] == ["--parent"]:
+        parts = prompt.split(None, 2)
+        if len(parts) != 3:
+            return f"/{engine} --parent <상위 카드 ID> <하위 작업 지시>"
+        _, parent, prompt = parts
+        parents.append(parent)
     if not prompt.strip():
         return f"/{engine} <작업 지시>"
     try:
-        slug, card = enqueue(engine, prompt, session_directory(platform), session_id)
+        slug, card = enqueue(engine, prompt, session_directory(platform, session_id), session_id, parents=parents)
     except (OSError, ValueError) as exc:
         return str(exc)
     return f"{engine} 작업 {card} 접수 · hermes kanban --board {slug} show {card}"
@@ -29,8 +48,8 @@ def slash(engine, prompt, session_id, platform):
 
 def submit_tool(args, *, session_id=None, tool_call_id=None, **kwargs):
     try:
-        cwd = session_directory(get_session_env("HERMES_SESSION_PLATFORM", ""))
-        slug, card = enqueue(args["agent"], args["prompt"], cwd, session_id,
+        cwd = session_directory(get_session_env("HERMES_SESSION_PLATFORM", ""), session_id)
+        slug, card = enqueue(args["agent"], args["prompt"], cwd, session_id, parents=args.get("parents", ()),
                              key=f"{session_id}/{tool_call_id}" if session_id and tool_call_id else None)
         return json.dumps({"board": slug, "task_id": card})
     except Exception as exc:
@@ -43,6 +62,7 @@ def setup_cli(parser):
     submit.add_argument("agent", choices=ENGINES)
     submit.add_argument("prompt")
     submit.add_argument("--session", help="Originating Hermes session ID for follow-up tasks")
+    submit.add_argument("--parent", action="append", default=[], help="Upstream Kanban card ID (repeatable)")
     commands.add_parser("board", help="Print the current project's Kanban board")
     commands.add_parser("knowledge", help="Print the QMD collection for findings in the current project")
     scope = commands.add_parser("search-scope", help="Print the collections for a QMD search")
@@ -53,8 +73,10 @@ def setup_cli(parser):
     restore.add_argument("--clone", action="store_true", help="Clone missing source repositories")
     telegram = commands.add_parser("telegram", help="Connect or inspect the Telegram operator DM")
     telegram.add_argument("operation", choices=("setup", "status"))
-    git_auth = commands.add_parser("git-auth", help="Configure or check GitHub read access for Pharmmate observers")
+    git_auth = commands.add_parser("git-auth", help="Configure or check this observer project’s read credentials")
+    git_auth.add_argument("--project", help="Project ID or slug (default: current folder)")
     git_auth.add_argument("operation", choices=("setup", "status"))
+    commands.add_parser("observer-check", help="Verify read-only observer mounts and both CLI hook paths in a fresh worker")
     commands.add_parser("serve", help="Run the Kanban CLI worker service")
     run = commands.add_parser("run-card", help="Internal supervised worker for one claimed checkout")
     run.add_argument("card_id")
@@ -71,7 +93,18 @@ def cli(args):
         (telegram.setup if args.operation == "setup" else telegram.status)()
     elif args.action == "git-auth":
         from . import git_auth
-        (git_auth.setup if args.operation == "setup" else git_auth.status)()
+        try:
+            git_auth.configure(args.operation, args.project)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+    elif args.action == "observer-check":
+        from .board import EnvironmentActionRequired
+        from .isolation import check_observer_mount
+        try:
+            check_observer_mount()
+        except EnvironmentActionRequired as exc:
+            raise SystemExit(str(exc)) from None
+        print("Observer 읽기 전용 마운트와 Codex·Claude 훅 경로 확인 완료")
     elif args.action == "serve":
         from .worker import serve
         serve()
@@ -87,14 +120,36 @@ def cli(args):
     elif args.action == "board":
         print(board_for_checkout(project_dir(Path.cwd())))
     else:
-        _, card = enqueue(args.agent, args.prompt, Path.cwd(), args.session)
+        _, card = enqueue(args.agent, args.prompt, Path.cwd(), args.session, parents=args.parent)
         print(card)
+
+
+def project_tool_policy(tool_name="", args=None, session_id="", **kwargs):
+    from .board import project_for_checkout
+    from .knowledge import collection_name, scope_query
+    try:
+        cwd = bound_directory(session_id)
+        if not cwd and get_session_env("HERMES_SESSION_PLATFORM", "") in ("", "cli", "local", "tui", "desktop"):
+            cwd = resolve_agent_cwd()
+        root = Path(os.environ.get("HERMES_DASHBOARD_FILES_ROOT", "/workspaces")).resolve()
+        path = Path(cwd).resolve() if cwd else root
+        owner = project_for_checkout(path) if path.is_relative_to(root) and path != root else None
+        if owner and owner.readonly:
+            if tool_name == "mcp__qmd__query":
+                return {"action": "modify", "args": {"collections": [collection_name(owner.primary_path)]}}
+            if tool_name in ("kanban_list", "kanban_show"):
+                return {"action": "modify", "args": {"board": owner.board_slug}}
+            if tool_name not in ("project_cli_submit", "clarify"):
+                return {"action": "block", "message": "읽기 전용 프로젝트입니다. 소스 분석은 project_cli_submit으로 Codex 또는 Claude에 맡기세요."}
+            return
+        return scope_query(tool_name, args, session_id, cwd=cwd, **kwargs)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return {"action": "block", "message": f"프로젝트 작업 범위를 확인할 수 없습니다 · {exc}"}
 
 
 def register(ctx):
     from . import telegram
-    from .knowledge import scope_query
-    ctx.register_hook("pre_tool_call", scope_query)
+    ctx.register_hook("pre_tool_call", project_tool_policy)
     ctx.register_approval_transport(telegram.TRANSPORT, telegram.present)
     ctx.register_hook("pre_approval_request", telegram.approval_started)
     ctx.register_hook("post_approval_response", telegram.approval_finished)
@@ -114,7 +169,9 @@ def register(ctx):
             "description": "Queue a project task when the user asks Codex or Claude to do it (codex에게 / claude에게). Return the task ID.",
             "parameters": {"type": "object", "properties": {
                 "agent": {"type": "string", "enum": list(ENGINES)},
-                "prompt": {"type": "string"}},
+                "prompt": {"type": "string"},
+                "parents": {"type": "array", "items": {"type": "string"},
+                            "description": "Upstream card IDs on this board for a subtask. Read-only subtasks inherit their Git snapshot."}},
                 "required": ["agent", "prompt"]},
         },
     )

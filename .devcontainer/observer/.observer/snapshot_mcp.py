@@ -29,7 +29,7 @@ TOOL = {
 
 def read_for_run(arguments):
     selection = gate.mcp_request(arguments)
-    receipt_path = os.environ.get('PHARMMATE_OBSERVER_RECEIPT')
+    receipt_path = os.environ.get('HERMES_OBSERVER_RECEIPT')
     if not selection or not receipt_path:
         raise ValueError('unverified request')
     receipt = json.loads(Path(receipt_path).read_text())
@@ -55,7 +55,7 @@ def reply(request):
         versions = ('2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05')
         version = params.get('protocolVersion')
         result = {'protocolVersion': version if version in versions else versions[0],
-                  'capabilities': {'tools': {}}, 'serverInfo': {'name': 'pharmmate_snapshot', 'version': '1.0'}}
+                  'capabilities': {'tools': {}}, 'serverInfo': {'name': 'project_snapshot', 'version': '1.0'}}
     elif method == 'ping':
         result = {}
     elif method == 'tools/list':

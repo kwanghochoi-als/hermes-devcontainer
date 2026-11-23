@@ -16,7 +16,8 @@ from hermes_cli import projects_db
 from hermes_constants import get_hermes_home
 
 from .board import EnvironmentActionRequired, project_for_checkout
-from .layout import BASE, OBSERVER, POLICY_FILES
+from .layout import BASE, OBSERVER
+from .observer import JOB_ROOT
 
 CONTROLLER = os.environ.get("HERMES_CLI_CONTROLLER", "agent-cli")
 LABEL = "io.hermes.project-worker"
@@ -185,8 +186,45 @@ class Container:
         return int(output.strip())
 
 
+def mount_observer_policy(mounts, engine):
+    try:
+        mounts.add(OBSERVER, JOB_ROOT)
+        if engine == "codex":
+            for file in ("hooks.json", "requirements.toml"):
+                mounts.add(OBSERVER / ".codex" / file, "/etc/codex/" + file)
+    except FileNotFoundError as exc:
+        raise EnvironmentActionRequired(f"운영 저장소의 observer 정책 파일을 확인하세요 · {exc.filename}") from exc
+
+
+def check_observer_mount():
+    info = json.loads(docker("inspect", CONTROLLER).stdout)[0]
+    mounts = Mounts(info)
+    # The policy directory contains Claude settings. Codex also uses managed files in /etc.
+    mount_observer_policy(mounts, "codex")
+    uid, gid = os.getuid(), os.getgid()
+    docker("run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
+           "--security-opt=no-new-privileges", "--user", f"{uid}:{gid}", "--tmpfs", "/tmp:rw,nosuid,nodev",
+           "--tmpfs", f"{IO}/snapshots:rw,nosuid,nodev,uid={uid},gid={gid},mode=0700",
+           "-e", "HOME=/tmp", *mounts.args, "--workdir", JOB_ROOT, "--entrypoint", "/usr/bin/python3",
+           info["Image"], "-I", "-B", JOB_ROOT + "/.observer/check_mount.py")
+
+
 @contextmanager
 def launch(engine, cli, cwd, project, files, prompt_text, lock, session, observer, attachments):
+    if observer:
+        with tempfile.TemporaryDirectory(dir=files) as tmp:
+            staging = Path(tmp)
+            (staging / "snapshots").symlink_to(observer.directory, target_is_directory=True)
+            (files / "snapshot.json").write_text(json.dumps(observer.commits))
+            with _launch(engine, cli, cwd, project, files, prompt_text, lock, session, staging, attachments) as job:
+                yield job
+    else:
+        with _launch(engine, cli, cwd, project, files, prompt_text, lock, session, None, attachments) as job:
+            yield job
+
+
+@contextmanager
+def _launch(engine, cli, cwd, project, files, prompt_text, lock, session, staging, attachments):
     info = json.loads(docker("inspect", CONTROLLER).stdout)[0]
     state = get_hermes_home() / "cli-workers"
     name = name_for(cwd)
@@ -194,7 +232,7 @@ def launch(engine, cli, cwd, project, files, prompt_text, lock, session, observe
     mounts = Mounts(info)
     env = []
     project_key = hashlib.sha256(str(project).encode()).hexdigest()
-    home = state / "homes" / project_key / engine
+    home = staging / "home" if staging else state / "homes" / project_key / engine
     home.mkdir(parents=True, mode=0o700, exist_ok=True)
     mounts.add(home, "/home/ubuntu", writable=True)
     mounts.add(toolchain(engine), "/opt/hermes-cli")
@@ -211,23 +249,13 @@ def launch(engine, cli, cwd, project, files, prompt_text, lock, session, observe
     if legacy:
         mounts.add(legacy, IO + "/legacy")
         env += ["-e", f"HERMES_LEGACY_PATH={legacy.relative_to(original)}"]
-    if observer:
-        for filename in POLICY_FILES:
-            mounts.add(OBSERVER / filename, cwd / filename)
-        if engine == "codex":
-            mounts.add(OBSERVER / ".codex/hooks.json", "/etc/codex/hooks.json")
-            mounts.add(OBSERVER / ".codex/requirements.toml", "/etc/codex/requirements.toml")
-        authdir = Path.home() / ".hermes/git-auth"
-        if not all((authdir / name).is_file() for name in ("pharmmate.token", "pharmmate.gitconfig")):
-            raise EnvironmentActionRequired("devcontainer에서 hermes project-cli git-auth setup으로 Git 읽기 인증을 "
-                                            "등록한 뒤 hermes project-cli git-auth status로 확인하세요.")
-        mounts.add(authdir / "pharmmate.token", IO + "/pharmmate.token")
-        mounts.add(authdir / "pharmmate.gitconfig", IO + "/gitconfig")
-        mounts.add(BASE / "project-cli/git_auth.py")
+    if staging:
+        mount_observer_policy(mounts, engine)
+        mounts.add(staging / "snapshots", IO + "/snapshots")
         receipt = files / "revisions.json"
         receipt.touch(mode=0o600)
         mounts.add(receipt, IO + "/revisions.json", writable=True)
-        env += ["-e", "PHARMMATE_OBSERVER_RECEIPT=" + IO + "/revisions.json", "-e", "GIT_CONFIG_GLOBAL=" + IO + "/gitconfig"]
+        env += ["-e", "HERMES_OBSERVER_RECEIPT=" + IO + "/revisions.json"]
     else:
         checkout_mounts(mounts, cwd, state)
     for source, target in attachments.items():
@@ -250,7 +278,7 @@ def launch(engine, cli, cwd, project, files, prompt_text, lock, session, observe
         args = ["run", "-d", "--pull=never", "--init", "--name", name, "--label", f"{LABEL}={CONTROLLER}",
                 "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop=ALL", "--security-opt=no-new-privileges",
                 "--tmpfs", "/run:rw,nosuid,nodev",
-                "--workdir", str(cwd), "--entrypoint", "/bin/sh", *env, *mounts.args,
+                "--workdir", JOB_ROOT if staging else str(cwd), "--entrypoint", "/bin/sh", *env, *mounts.args,
                 info["Image"], "-c", shell, "hermes-job", engine, *cli]
         cid = docker(*args).stdout.strip()
         job = Container(cid)

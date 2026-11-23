@@ -15,7 +15,7 @@ import snapshot_mcp
 
 
 class ObserverTest(unittest.TestCase):
-    def test_refresh_reads_new_remote_commit_without_touching_checkout(self):
+    def test_pinned_snapshot_is_session_bound_and_fails_closed_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             origin, checkout, cache = (root / k for k in ('source', 'checkout', 'cache'))
@@ -28,25 +28,27 @@ class ObserverTest(unittest.TestCase):
                 git('-C', origin, '-c', 'user.name=fixture', '-c', 'user.email=test@invalid', 'commit', '-m', text)
             publish('one'); git('clone', origin, checkout); publish('two')
             (checkout / 'README').write_text('developer WIP')
-            rev = gate.refresh(checkout, cache)
+            cache = root / 'Data_API-2.git'
+            git('clone', '--bare', origin, cache)
+            rev = git('--git-dir', cache, 'rev-parse', 'HEAD')
             self.assertEqual(rev, git('-C', origin, 'rev-parse', 'HEAD'))
             self.assertEqual(git('--git-dir', cache, 'show', rev + ':README'), 'two')
             self.assertEqual((checkout / 'README').read_text(), 'developer WIP')
             receipt = root / 'receipt.json'
-            with patch.object(gate,'CACHE',root/'mirrors'), patch.object(gate,'REPOS',{'pharmmate':checkout}), \
-                    patch.dict(os.environ, PHARMMATE_OBSERVER_RECEIPT=str(receipt)):
+            with patch.object(gate,'CACHE',root/'mirrors'), patch.object(gate,'REPOS',{'Data_API-2':rev}), patch.object(gate,'SNAPSHOTS',root), \
+                    patch.dict(os.environ, HERMES_OBSERVER_RECEIPT=str(receipt)):
                 event={'session_id':'test','hook_event_name':'UserPromptSubmit'}
                 with redirect_stdout(StringIO()): gate.hook(event)
-                self.assertEqual(json.loads(receipt.read_text()), {'session_id':'test','repositories':{'pharmmate':rev}})
+                self.assertEqual(json.loads(receipt.read_text()), {'session_id':'test','repositories':{'Data_API-2':rev}})
                 token=gate.key(event).read_text()
                 output = dict(event, hook_event_name='PreToolUse', tool_name='StructuredOutput',
-                              tool_input=dict(status='completed', summary='done', tests='ok', knowledge=[]))
+                              tool_input=dict(status='completed', request_kind='none', summary='done', tests='ok', knowledge=[]))
                 with redirect_stdout(StringIO()) as printed: gate.hook(output)
                 self.assertEqual(json.loads(printed.getvalue())['hookSpecificOutput']['permissionDecision'], 'allow')
-                tool=dict(event,hook_event_name='PreToolUse',tool_name='Bash',tool_input={'command':gate.READER+' '+token+' show pharmmate README'})
+                tool=dict(event,hook_event_name='PreToolUse',tool_name='Bash',tool_input={'command':gate.READER+' '+token+' show Data_API-2 README'})
                 with redirect_stdout(StringIO()) as output: gate.hook(tool)
                 self.assertEqual(json.loads(output.getvalue())['hookSpecificOutput']['permissionDecision'],'allow')
-                args = {'snapshot': token, 'repository': 'pharmmate'}
+                args = {'snapshot': token, 'repository': 'Data_API-2'}
                 self.assertEqual(snapshot_mcp.read_for_run(args).splitlines(), ['README'])
                 self.assertEqual(snapshot_mcp.read_for_run(dict(args, path='README')), 'two')
                 call = dict(method='tools/call', jsonrpc='2.0', id=42)
@@ -55,27 +57,35 @@ class ObserverTest(unittest.TestCase):
                     reply = snapshot_mcp.reply(dict(call, params={'name': 'read_snapshot', 'arguments': invalid}))
                     self.assertTrue(reply['result']['isError'])
                 old_receipt = receipt.read_text()
-                receipt.write_text(json.dumps({'session_id': 'other', 'repositories': {'pharmmate': rev}}))
+                receipt.write_text(json.dumps({'session_id': 'other', 'repositories': {'Data_API-2': rev}}))
                 with self.assertRaises(OSError): snapshot_mcp.read_for_run(args)
-                receipt.write_text(json.dumps({'session_id': 'test', 'repositories': {'pharmmate': '0' * 40}}))
+                receipt.write_text(json.dumps({'session_id': 'test', 'repositories': {'Data_API-2': '0' * 40}}))
                 with self.assertRaises(ValueError): snapshot_mcp.read_for_run(args)
                 receipt.write_text(old_receipt)
-                with patch.dict(os.environ, PHARMMATE_OBSERVER_READER='mcp'):
+                with patch.dict(os.environ, HERMES_OBSERVER_READER='mcp'):
                     with redirect_stdout(StringIO()) as out:
                         gate.hook(dict(tool, tool_name=gate.MCP_TOOL, tool_input=args))
                     self.assertEqual(json.loads(out.getvalue())['hookSpecificOutput']['permissionDecision'], 'allow')
                     with self.assertRaises(ValueError): gate.hook(tool)
-                origin.rename(root / 'offline')
+                cache.rename(root / 'offline')
                 with self.assertRaises(subprocess.SubprocessError): gate.hook(event)
                 with self.assertRaises(FileNotFoundError): gate.hook(tool)
                 self.assertEqual(receipt.read_text(), '')
                 with self.assertRaises(ValueError): snapshot_mcp.read_for_run(args)
-            with self.assertRaises(subprocess.SubprocessError): gate.refresh(checkout, cache)
+
+    def test_shell_and_mcp_read_paths_with_spaces_and_unicode(self):
+        token = 'a' * 32
+        with patch.object(gate, 'REPOS', {'Product_2': 'b' * 40}):
+            args = dict(snapshot=token, repository='Product_2', path='docs/한글 파일.md')
+            prefix = f'{gate.READER} {token} show Product_2 '
+            self.assertEqual(gate.words(prefix + "'docs/한글 파일.md'"), gate.mcp_request(args))
+            self.assertIsNone(gate.words(prefix + 'README && ls'))
+            self.assertIsNone(gate.mcp_request(dict(args, path='../escape')))
 
     def test_tool_denied_by_default(self):
         for tool in ['Edit', 'Write', 'Agent', 'apply_patch', 'mcp__git__push', 'Read']:
             self.assertFalse(gate.requested_read({'tool_name': tool, 'tool_input': {}}))
-        for cmd in ['git push', 'touch x', gate.READER + ' list pharmmate; touch x']:
+        for cmd in ['git push', 'touch x', gate.READER + ' list Data_API-2; touch x']:
             self.assertFalse(gate.requested_read({'tool_name': 'Bash', 'tool_input': {'command': cmd}}))
 
     def test_probe_requires_its_own_fresh_snapshot_and_blocks_the_read(self):
@@ -85,18 +95,18 @@ class ObserverTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             proof, receipt = root / challenge, root / 'business-receipt'
-            with patch.object(gate, 'CACHE', root / 'cache'), patch.object(gate, 'REPOS', {'pharmmate': 'origin'}), \
-                    patch.object(gate, 'refresh', return_value=commit) as fetch, \
-                    patch.dict(os.environ, PHARMMATE_OBSERVER_PROBE=challenge, PHARMMATE_OBSERVER_PROBE_DIR=tmp,
-                               PHARMMATE_OBSERVER_RECEIPT=str(receipt)):
+            with patch.object(gate, 'CACHE', root / 'cache'), patch.object(gate, 'REPOS', {'Data_API-2': 'origin'}), \
+                    patch.object(gate, 'verify_revision', return_value=commit) as fetch, \
+                    patch.dict(os.environ, HERMES_OBSERVER_PROBE=challenge, HERMES_OBSERVER_PROBE_DIR=tmp,
+                               HERMES_OBSERVER_RECEIPT=str(receipt)):
                 with redirect_stdout(StringIO()) as output:
                     gate.hook(session)
                 context = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
-                token = context.split('PHARMMATE_OBSERVER_OK ')[1].split('.')[0]
-                command = f'{gate.READER} {token} list pharmmate'
+                token = context.split('HERMES_OBSERVER_OK ')[1].split('.')[0]
+                command = f'{gate.READER} {token} list Data_API-2'
                 self.assertIn(command, context)
                 fetch.assert_called_once()
-                self.assertEqual(json.loads((gate.CACHE / token).read_text()), {'pharmmate': commit})
+                self.assertEqual(json.loads((gate.CACHE / token).read_text()), {'Data_API-2': commit})
                 self.assertFalse(receipt.exists())
 
                 def call(cmd, sid='probe-session'):
@@ -108,8 +118,8 @@ class ObserverTest(unittest.TestCase):
                 call('pwd')
                 call(command, sid='another-session')
                 call(command.replace(token, '0' * 32))
-                call(command.replace('list pharmmate', 'show pharmmate README'))
-                with patch.dict(os.environ, PHARMMATE_OBSERVER_PROBE='tool-' + '2' * 32):
+                call(command.replace('list Data_API-2', 'show Data_API-2 README'))
+                with patch.dict(os.environ, HERMES_OBSERVER_PROBE='tool-' + '2' * 32):
                     call(command)
                     self.assertFalse((root / ('tool-' + '2' * 32)).exists())
                 self.assertFalse(proof.exists())
@@ -117,18 +127,18 @@ class ObserverTest(unittest.TestCase):
                 self.assertEqual(proof.read_text(), 'PreToolUse')
 
                 mcp_challenge = 'tool-' + '3' * 32
-                with patch.dict(os.environ, PHARMMATE_OBSERVER_READER='mcp', PHARMMATE_OBSERVER_PROBE=mcp_challenge):
+                with patch.dict(os.environ, HERMES_OBSERVER_READER='mcp', HERMES_OBSERVER_PROBE=mcp_challenge):
                     with redirect_stdout(StringIO()) as output:
                         gate.hook(session)
                     context = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
                     self.assertIn(gate.MCP_TOOL, context)
-                    mcp_token = context.split('PHARMMATE_OBSERVER_OK ')[1].split('.')[0]
-                    call(f'{gate.READER} {mcp_token} list pharmmate')
+                    mcp_token = context.split('HERMES_OBSERVER_OK ')[1].split('.')[0]
+                    call(f'{gate.READER} {mcp_token} list Data_API-2')
                     mcp_proof = root / mcp_challenge
                     for current in (token, mcp_token):
                         with redirect_stdout(StringIO()) as response:
                             gate.hook(dict(session, hook_event_name='PreToolUse', tool_name=gate.MCP_TOOL,
-                                           tool_input={'snapshot': current, 'repository': 'pharmmate'}))
+                                           tool_input={'snapshot': current, 'repository': 'Data_API-2'}))
                         self.assertEqual(json.loads(response.getvalue())['hookSpecificOutput']['permissionDecision'], 'deny')
                         self.assertEqual(mcp_proof.is_file(), current == mcp_token)
                     self.assertFalse(receipt.exists())
@@ -137,13 +147,13 @@ class ObserverTest(unittest.TestCase):
         script = Path(__file__).with_name('start.py')
 
         def cli(args, **kwargs):
-            challenge = kwargs['env'].get('PHARMMATE_OBSERVER_PROBE')
-            self.assertNotIn('PHARMMATE_OBSERVER_RECEIPT', kwargs['env'])
+            challenge = kwargs['env'].get('HERMES_OBSERVER_PROBE')
+            self.assertNotIn('HERMES_OBSERVER_RECEIPT', kwargs['env'])
             if challenge and not challenge.startswith('tool-'):
-                (Path(kwargs['env']['PHARMMATE_OBSERVER_PROBE_DIR']) / challenge).write_text('UserPromptSubmit')
+                (Path(kwargs['env']['HERMES_OBSERVER_PROBE_DIR']) / challenge).write_text('UserPromptSubmit')
             return subprocess.CompletedProcess(args, 0)
 
-        with patch.dict(os.environ, PHARMMATE_OBSERVER_RECEIPT='business'), patch('os.chdir'), \
+        with patch.dict(os.environ, HERMES_OBSERVER_RECEIPT='business'), patch('os.chdir'), \
                 patch.object(sys, 'argv', [str(script), 'codex', '--worker', 'schema']), \
                 patch('subprocess.run', side_effect=cli), patch('os.execvp') as submit, \
                 redirect_stdout(StringIO()) as out, redirect_stderr(StringIO()), self.assertRaises(SystemExit) as exit_:

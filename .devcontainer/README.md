@@ -40,26 +40,50 @@ hermes kanban --board test-prj log <카드-ID> --run <Run-ID>
 
 웹앱은 카드의 **Runs**, 대시보드는 **Run history**에서 시도별 Run ID와 마지막으로 성공한 단계를 보여줍니다. **시도 로그 보기**를 열면 해당 시도의 CLI 실행 이벤트와 표준 오류를 확인할 수 있습니다. 실행 중에는 열린 로그가 자동 갱신됩니다.
 
-CLI에서는 `runs`에 표시된 **Run # 뒤의 숫자**를 `log --run`에 사용합니다. 두 로그에서 각각 최근 64 KiB까지 읽고, 잘린 줄은 생략합니다. CLI 이벤트는 유형·종료 코드·오류 위주로 표시하고 인증 정보는 가립니다. 새 시도에서는 작업 폴더 검증, 컨테이너 시작, CLI 세션 연결, 결과 보고 수신을 기록합니다. Pharmmate에서는 스냅샷 사전 점검과 두 훅의 자가 검사 성공도 기록합니다. 기존 시도에는 당시 Kanban에 기록된 단계만 표시합니다.
+CLI에서는 `runs`에 표시된 **Run # 뒤의 숫자**를 `log --run`에 사용합니다. 두 로그에서 각각 최근 64 KiB까지 읽고, 잘린 줄은 생략합니다. CLI 이벤트는 유형·종료 코드·오류 위주로 표시하고 인증 정보는 가립니다. 새 시도에서는 작업 폴더 검증, 컨테이너 시작, CLI 세션 연결, 결과 보고 수신을 기록합니다. 읽기 전용 프로젝트에서는 스냅샷 사전 점검과 두 훅의 자가 검사 성공도 기록합니다. 기존 시도에는 당시 Kanban에 기록된 단계만 표시합니다.
 
-- 일반 프로젝트에서 워커는 `codex exec --dangerously-bypass-approvals-and-sandbox` 또는 `claude -p --dangerously-skip-permissions`로 실행합니다. 새 카드와 세션 재개에 같은 옵션을 적용합니다. Pharmmate 관찰 전용 보드는 대화형 승인 없이 원격 `main`의 고정된 커밋만 조회하는 전용 실행기를 사용합니다.
+- 일반 프로젝트에서 워커는 `codex exec --dangerously-bypass-approvals-and-sandbox` 또는 `claude -p --dangerously-skip-permissions`로 실행합니다. 새 카드와 세션 재개에 같은 옵션을 적용합니다. 읽기 전용 프로젝트에서 두 CLI는 상위 작업이 고정한 Git 커밋을 조회합니다.
 - 워커는 프로젝트와 CLI마다 인증·세션용 홈을 두고 카드마다 별도 Docker 컨테이너를 실행합니다. 일반 카드에는 선택한 checkout, 연결된 worktree의 공통 Git 메타데이터, 해당 카드의 첨부파일을 연결합니다. 워커에서는 컨트롤러의 Docker 소켓, Hermes DB, 다른 프로젝트 홈에 접근할 수 없습니다. 운영 저장소 자체에 작업을 위임할 때는 `/workspaces`의 별도 Git worktree를 엽니다.
 - 같은 checkout에서는 한 번에 한 카드를 접수 순서대로 실행합니다. 기본 병렬 한도는 전체 4개, 프로젝트당 2개입니다. 별도 worktree에 접수하면 같은 프로젝트에서도 두 작업을 진행할 수 있습니다. 기본 실행 한도는 24시간이며, Kanban 카드에 지정한 `--max-runtime`이 우선합니다. Compose 환경 변수 `HERMES_CLI_CONCURRENCY`, `HERMES_CLI_PROJECT_CONCURRENCY`, `HERMES_CLI_MAX_RUNTIME_SECONDS`로 조정할 수 있습니다. 실행 시간에 0을 지정하면 시간제한이 해제됩니다.
 - 위임을 접수하고 워커가 카드를 가져갈 때 보드의 프로젝트 ID, 폴더 소유자, Git worktree의 원본을 검증합니다. 다른 프로젝트를 가리키는 수동 생성 카드는 원인을 기록하고 차단됩니다.
-- 같은 Hermes 세션·checkout·CLI의 후속 카드는 저장한 원본 CLI 세션 ID로 재개됩니다. 다른 CLI로 넘길 때는 같은 세션과 checkout에서 마지막으로 완료한 카드의 요약과 테스트 결과를 함께 전달합니다. 셸에서 같은 대화로 이어가려면 제출할 때 동일한 `--session <Hermes-세션-ID>`를 지정합니다.
+- 일반 프로젝트에서 같은 Hermes 세션·checkout·CLI의 후속 카드는 저장한 원본 CLI 세션 ID로 재개됩니다. 다른 CLI로 넘길 때는 같은 세션과 checkout에서 마지막으로 완료한 카드의 요약과 테스트 결과를 함께 전달합니다. 셸에서 같은 대화로 이어가려면 제출할 때 동일한 `--session <Hermes-세션-ID>`를 지정합니다.
 - 워커가 성공적으로 종료하고 완료 보고를 반환하면 카드에 결과, 보고된 테스트, 현재 HEAD, CLI 세션 ID와 로그 경로가 기록됩니다. 승인 필요, CLI 오류, 완료 보고 누락, 실행 도중 워커 중단은 `blocked`로 처리합니다. 실제 변경과 실행별 로그를 확인한 뒤 `hermes kanban --board test-prj unblock <카드-ID>`로 같은 작업을 다시 맡길 수 있습니다.
 - 게이트웨이와 CLI 워커는 독립 프로세스입니다. 터미널을 닫거나 게이트웨이를 재시작해도 워커는 계속 실행됩니다. 컨테이너가 멈추면 다음 기동에서 대기 카드를 이어 처리하고 중단된 시도의 기록을 보존합니다.
 
-## Pharmmate 백그라운드 Git 읽기 인증
+## 읽기 전용 프로젝트 만들기
 
-VS Code를 닫은 뒤에도 Hermes가 Pharmmate 리뷰를 시작하려면 devcontainer가 실행 중이어야 합니다. GitHub에서 fine-grained personal access token을 만들 때 소유자로 `alssolution`을 선택합니다. **Only select repositories**에서 `pharmmate`, `pharmmate-als`, `gitops-als`, `infra-als`, `jenkins-als`, `jenkins-lib`를 선택하고 **Contents** 권한을 **Read-only**로 지정합니다. 조직에서 승인을 요구하면 승인 후 등록합니다. [GitHub 토큰 생성](https://github.com/settings/personal-access-tokens/new?name=Hermes+Pharmmate&target_name=alssolution&contents=read) · [GitHub 권한 안내](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+웹앱의 **새 프로젝트 → 읽기 전용 (Observer)** 을 선택하거나 CLI에서 다음과 같이 만듭니다.
 
 ```bash
-hermes project-cli git-auth setup
-hermes project-cli git-auth status
+hermes project create review /workspaces/review --readonly
+hermes project show review
 ```
 
-`setup`의 숨김 입력란에 토큰을 붙여 넣습니다. 여섯 원격의 `main`을 모두 확인하면 토큰을 영속 볼륨의 `~/.hermes/git-auth/pharmmate.token`에 권한 `0600`으로 저장합니다. 전용 Git 인증은 `~/.cache/pharmmate-observer/`의 미러에 적용되며, 실행 중인 게이트웨이와 워커도 다음 Git 호출부터 사용합니다. 토큰 갱신도 같은 `setup` 명령으로 진행합니다.
+새 폴더에는 초기 Git 커밋을 만듭니다. 기존 Git 폴더를 선택하거나, 아래 예시처럼 여러 원격을 이름으로 등록할 수 있습니다.
+
+```bash
+hermes project create service-review --readonly \
+  --source api=https://github.com/example/api.git \
+  --source web=https://github.com/example/web.git
+hermes project-cli git-auth setup --project service-review
+hermes project-cli git-auth status --project service-review
+```
+
+**상위 작업**은 선행 카드가 없는 새 작업입니다. 실행을 시작할 때 등록된 폴더에서 새 복제본을 발견하고 모든 원격의 `refs/heads/main`을 fetch합니다. 원격이 있는 SSH·로컬 경로 복제본에도 같은 기준을 적용합니다. 처음부터 원격 없이 등록한 로컬 저장소는 그 시점의 커밋된 `HEAD`를 사용합니다. 최신화할 원격 주소나 브랜치를 확인할 수 없으면 카드는 환경 조치를 요청합니다. 워커는 별도의 읽기 전용 Git 스냅샷에서 실행하므로 개발자의 작업 트리와 미커밋 파일을 건드리지 않습니다.
+
+**하위 작업**은 부모 카드와 같은 저장소 목록과 SHA를 읽습니다. 원격이 바뀌거나 연결이 끊겨도 형제·손자 카드와 분해 결과를 모으는 카드가 같은 파일을 볼 수 있습니다. 승인이나 환경 조치 후 재개하는 하위 카드는 처음 확정한 커밋을 계속 사용합니다. 저장된 Git 객체가 누락되면 카드가 환경 조치를 요청합니다. 대시보드에서 상위 카드를 다시 열어 Kanban이 `--parent`로 연결한 하위 결과까지 무효화하면 해당 카드들은 새 상위 실행의 커밋을 이어받습니다.
+
+Kanban의 `decompose`는 하위 카드를 만들기 전에 상위 스냅샷을 확정합니다. 선행 작업이 대기 중이면 그 의존성을 하위 카드에도 연결해 선행 작업이 확정한 커밋을 물려줍니다. 여러 부모를 지정했을 때 서로 다른 스냅샷을 가리키면 사유를 카드에 표시합니다. 독립된 상위 카드의 새 실행은 최신화를 다시 수행합니다.
+
+프로젝트 세션에서 먼저 `/codex 서비스 구조를 분석해 줘`로 상위 카드를 만듭니다. 발급된 카드 ID가 `t_1234abcd`라면 `/claude --parent t_1234abcd 인증 흐름을 검토해 줘`로 같은 커밋에서 후속 검토를 시작합니다. 셸에서도 부모를 지정할 수 있습니다.
+
+```bash
+hermes project-cli submit claude "인증 흐름을 검토해 줘" --parent t_1234abcd
+```
+
+새 복제본은 다음 상위 작업의 스냅샷에 합류합니다. 숨김 폴더(`.worktrees` 포함), 의존성 폴더, 심볼릭 링크, Git worktree·서브모듈과 다른 프로젝트의 폴더는 탐색에서 제외합니다. 같은 원격은 한 번만 등록합니다. 등록 목록은 `hermes project show <프로젝트>`에서 확인합니다.
+
+비공개 HTTPS 저장소에는 `git-auth setup`으로 등록한 프로젝트의 읽기 토큰을 사용합니다. 토큰은 첫 HTTPS 호스트의 등록 URL에만 보내며 다른 HTTPS 호스트는 익명으로 조회합니다. SSH는 컨트롤러 사용자에게 등록된 호스트 키와 비대화형 SSH 인증을 사용합니다. 로컬 경로 원격은 작업 공간 안에서 다른 프로젝트와 겹치지 않는 Git 저장소여야 합니다.
 
 ## Telegram에서 승인·자료 요청·환경 조치 처리하기
 
@@ -113,7 +137,7 @@ qmd embed
 
 `/codex`와 `/claude` 워커는 작업 중 직접 확인한 프로젝트 사실과 근거 파일·테스트를 완료 보고에 담습니다. 근거가 있는 발견이 있으면 백그라운드 워커가 완료된 실행마다 Markdown 한 파일을 저장하고, 이 프로젝트의 QMD 컬렉션을 자동 등록·갱신합니다. 문서에는 카드 ID, 워커, 완료 시각, 확인 당시의 Git HEAD(있는 경우)가 함께 기록됩니다. 차단된 작업과 발견이 없는 작업은 건너뜁니다.
 
-카드를 실행할 때 Hermes는 제목과 본문으로 해당 프로젝트의 이전 완료 문서를 검색해, 관련 문서 최대 3개의 발췌와 출처를 워커에게 전달합니다. 새 세션, 다른 CLI, 등록 프로젝트의 연결된 Git worktree에서도 같은 지식을 활용합니다. 워커는 문서에 기록된 과거 커밋을 참고해 현재 코드에서 근거를 다시 확인합니다. Pharmmate에서는 이번 실행이 검증한 원격 스냅샷으로 확인합니다.
+카드를 실행할 때 Hermes는 제목과 본문으로 해당 프로젝트의 이전 완료 문서를 검색해, 관련 문서 최대 3개의 발췌와 출처를 워커에게 전달합니다. 새 세션, 다른 CLI, 등록 프로젝트의 연결된 Git worktree에서도 같은 지식을 활용합니다. 워커는 문서에 기록된 과거 커밋을 참고해 현재 코드에서 근거를 다시 확인합니다. 읽기 전용 프로젝트에서는 이번 실행의 스냅샷으로 확인합니다.
 
 검색에는 QMD 키워드 색인과 호스트 Ollama 임베딩을 사용합니다. Ollama가 응답하지 않으면 키워드 검색 결과를 사용하고, 색인을 사용할 수 없거나 관련 근거가 없으면 카드 내용으로 바로 진행합니다. 완료된 시도에 전달한 문서 주소는 Kanban 실행 메타데이터의 `knowledge_references`에서 확인할 수 있습니다.
 
@@ -126,9 +150,9 @@ qmd search '재시도 정책' --all-projects
 
 카드 완료와 색인은 독립적으로 처리됩니다. Ollama 연결이 끊기면 완료 보고와 Markdown이 남고, 워커가 30초 후 색인을 다시 시도합니다. 워커를 재시작해도 미처리 보고를 읽어 재개합니다. 성공하면 `hermes kanban --board test-prj show <카드-ID> --json`의 `knowledge_indexed` 이벤트에 검색 가능한 문서 주소가 기록됩니다.
 
-Pharmmate의 Codex 워커는 `pharmmate_snapshot` 조회 도구로 여섯 원격의 고정된 `main` 커밋에서 파일 목록과 내용을 읽습니다. 워커는 분석을 시작하기 전에 자가 검사 세션에서 이 도구의 호출이 훅으로 차단되는지 확인합니다. 실제 분석 세션이 발급받은 스냅샷으로만 조회할 수 있습니다.
+읽기 전용 프로젝트의 Codex 워커는 `project_snapshot` 조회 도구로 등록된 저장소의 고정된 커밋에서 파일 목록과 내용을 읽습니다. 워커는 분석을 시작하기 전에 자가 검사 세션에서 이 도구의 호출이 훅으로 차단되는지 확인합니다. 실제 분석 세션이 발급받은 스냅샷으로만 조회할 수 있습니다.
 
-Pharmmate 관찰이 완료되면 그 CLI 세션이 실제로 읽을 수 있었던 원격 6곳의 저장소 이름과 `main` 커밋 SHA를 Kanban 실행의 `source_commits`와 QMD 문서에 기록합니다. 이 경우에는 별도 지식 항목이 없어도 출처 문서를 만듭니다.
+Git 커밋을 확정하면 Kanban 실행 이벤트에 저장소별 SHA를 기록합니다. 완료한 실행에서는 `source_snapshot.card`로 원본 상위 카드를, `source_commits`로 저장소별 SHA를 확인할 수 있습니다. QMD 문서에도 출처를 기록합니다. Git 객체는 Hermes 볼륨의 `cli-workers/boards/<보드>/runs/`에 상위 실행별로 보관하며 프로젝트 삭제 시 함께 정리됩니다.
 
 ## 저장 위치
 
@@ -150,9 +174,15 @@ VS Code에서 **Dev Containers: Rebuild Container**를 실행하면 Docker Compo
 
 초기 설치는 `.devcontainer/setup-projects.sh`에서 Hermes 기본 생성기와 웹앱 폼에 연동 패치를 적용한 다음 웹앱을 빌드합니다.
 
+Observer 정책 원본은 호스트 작업 폴더의 `.devcontainer/observer/`에 있습니다. 읽기 전용 카드를 실행할 때마다 새 워커의 `/opt/hermes-observer`에 이 폴더를 읽기 전용으로 마운트합니다. 리빌드 후 초기 설정은 임시 워커에서 Codex·Claude 훅이 테스트 커밋을 읽고 쓰기 요청을 차단하는지 확인합니다. devcontainer 셸에서 같은 점검을 다시 실행할 수 있습니다.
+
+```bash
+hermes project-cli observer-check
+```
+
 ### 새 호스트에서 프로젝트 복원
 
-운영 저장소에는 `.devcontainer/projects.json`의 상대 경로·원격 목록과 `.devcontainer/observer/`의 Pharmmate 관찰 정책이 들어 있습니다. 초기 기동에서는 프로젝트 데이터를 만들지 않습니다. 다음 명령은 지정한 프로젝트의 Git 루트, 보드, 시작 세션, QMD 컬렉션을 준비합니다. `--clone`을 붙이면 현재 Git 자격 증명으로 목록에서 빠진 checkout을 내려받습니다. 같은 origin의 기존 checkout은 그대로 사용하며, 다른 origin이 있으면 해당 경로를 표시하고 중단합니다.
+운영 저장소에는 `.devcontainer/projects.json`의 상대 경로·원격 목록과 `.devcontainer/observer/`의 공통 관찰 정책이 들어 있습니다. 초기 기동에서는 프로젝트 데이터를 만들지 않습니다. 다음 명령은 지정한 프로젝트의 Git 루트, 보드, 시작 세션, QMD 컬렉션을 준비합니다. `--clone`을 붙이면 현재 Git 자격 증명으로 목록에서 빠진 checkout을 내려받습니다. 같은 origin의 기존 checkout은 그대로 사용하며, 다른 origin이 있으면 해당 경로를 표시하고 중단합니다.
 
 ```bash
 hermes project-cli restore pharmmate

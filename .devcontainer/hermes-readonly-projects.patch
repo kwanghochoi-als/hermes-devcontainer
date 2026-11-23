@@ -1,0 +1,446 @@
+--- a/hermes_cli/projects_db.py
++++ b/hermes_cli/projects_db.py
+@@ -74,9 +74,9 @@
+ _INITIALIZED_PATHS: set[str] = set()
+ # TEXT columns added to `projects` after v1; re-applied idempotently on every open so a legacy DB
+ # upgrades in place.
+-_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
++_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color", "observer_sources")
+ # Nullable TEXT columns that may be absent from a legacy row.
+-_OPTIONAL_ROW_FIELDS = ("description", "icon", "color", "board_slug", "primary_path")
++_OPTIONAL_ROW_FIELDS = ("description", "icon", "color", "board_slug", "primary_path", "observer_sources")
+ _ACTIVE_META_KEY = "active_id"
+ _DISCOVERY_POLICY_META_KEY = "repo_discovery_policy"
+ 
+@@ -170,8 +170,15 @@
+     archived: bool = False
+     folders: list[ProjectFolder] = field(default_factory=list)
+ 
++    observer_sources: Optional[str] = None
++
++    @property
++    def readonly(self) -> bool:
++        return self.observer_sources is not None
++
+     def to_dict(self) -> dict:
+         d = {k: getattr(self, k) for k in ("id", "slug", "name", *_OPTIONAL_ROW_FIELDS)}
++        d["readonly"] = d.pop("observer_sources") is not None
+         return {**d, "archived": bool(self.archived), "created_at": self.created_at, "folders": [f.to_dict() for f in self.folders]}
+ 
+ 
+@@ -225,6 +232,7 @@
+     conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
+     primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
+     color: Optional[str] = None, board_slug: Optional[str] = None, allow_duplicate_path: bool = False,
++    observer_sources: Optional[str] = None,
+ ) -> str:
+     """Create a project and return its id. ``folders`` are normalized to absolute paths; ``primary_path``
+     is added to the folder set (if absent) and marked primary, else the first folder becomes primary."""
+@@ -248,10 +256,10 @@
+         )
+     with write_txn(conn):
+         conn.execute(
+-            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, archived) "
+-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
++            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, observer_sources, archived) "
++            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+             (pid, _unique_slug(conn, slug_candidate), name, description, icon, color,
+-             normalize_slug(board_slug) if board_slug else None, primary, now),
++             normalize_slug(board_slug) if board_slug else None, primary, now, observer_sources),
+         )
+         conn.executemany(
+             "INSERT INTO project_folders (project_id, path, label, is_primary, added_at) VALUES (?, ?, ?, ?, ?)",
+--- a/hermes_cli/projects_cmd.py
++++ b/hermes_cli/projects_cmd.py
+@@ -30,6 +30,8 @@
+     for opt in ("--description", "--icon", "--color"):
+         p_create.add_argument(opt, default=None)
+     p_create.add_argument("--board", default=None, metavar="SLUG", help="Bind a kanban board")
++    p_create.add_argument("--readonly", action="store_true", default=None, help="Run both CLI workers as read-only observers")
++    p_create.add_argument("--source", action="append", metavar="NAME=HTTPS_URL", help="Repository to observe (repeatable)")
+     p_create.add_argument("--use", action="store_true", help="Set as the active project")
+     p_list = sub.add_parser("list", aliases=["ls"], help="List projects")
+     p_list.add_argument("--all", action="store_true", dest="include_archived", help="Include archived projects")
+@@ -123,10 +125,15 @@
+ 
+ def _print_project(proj) -> None:
+     print(f"{proj.slug}  [{proj.id}]{' (archived)' if proj.archived else ''}")
++    print("  mode:    " + ("readonly" if proj.readonly else "readwrite"))
+     print(f"  name:    {proj.name}")
+     for label, value in (("about", proj.description), ("board", proj.board_slug), ("primary", proj.primary_path)):
+         if value:
+             print(f"  {label}:{' ' * (8 - len(label))}{value}")
++    if proj.readonly:
++        import json
++        for name, source in json.loads(proj.observer_sources).items():
++            print(f"  source:  {name} = {source}")
+     if proj.folders:
+         print("  folders:")
+         for f in proj.folders:
+@@ -137,6 +144,7 @@
+ def _cmd_create(args, conn) -> int:
+     pid = pdb.create_project(
+         conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
++        readonly=args.readonly, sources=args.source,
+         description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
+     )
+     if args.use:
+--- a/tui_gateway/methods_projects.py
++++ b/tui_gateway/methods_projects.py
+@@ -88,17 +88,26 @@
+     return _ok(rid, {"project": _require_project(pdb, conn, params).to_dict()})
+ 
+ 
+-@_projects_method("projects.create")
+-def _(rid, params, pdb, conn) -> dict:
++def _create_workspace(rid, params, pdb, conn) -> dict:
+     pid = pdb.create_project(
+         conn, name=str(params.get("name") or ""), folders=params.get("folders") or [],
+-        **_pick(params, "slug", "primary_path", "description", "icon", "color", "board_slug"))
++        **_pick(params, "readonly", "sources", "slug", "primary_path", "description", "icon", "color", "board_slug"))
+     if params.get("use"):
+         pdb.set_active(conn, pid)
+     from hermes_cli.observability.shared_metrics_signals import record_feature_used
+     record_feature_used("projects")
+     proj = pdb.get_project(conn, pid)
+     return _ok(rid, {"project": proj.to_dict() if proj else None})
++
++
++@_projects_method("projects.create_readonly")
++def _(rid, params, pdb, conn) -> dict:
++    return _create_workspace(rid, {**params, "readonly": True}, pdb, conn)
++
++
++@_projects_method("projects.create")
++def _(rid, params, pdb, conn) -> dict:
++    return _create_workspace(rid, params, pdb, conn)
+ 
+ 
+ @_projects_method("projects.archive")
+--- a/tools/project_tools.py
++++ b/tools/project_tools.py
+@@ -68,7 +68,7 @@
+     _apply_workspace(task_id, primary, proj.name)
+     return json.dumps({
+         "success": True, "id": proj.id, "slug": proj.slug, "name": proj.name,
+-        "primary_path": primary})
++        "primary_path": primary, "readonly": proj.readonly})
+ 
+ 
+ def _calling_session_project_id(conn, task_id: Optional[str]) -> tuple[bool, Optional[str]]:
+@@ -98,11 +98,11 @@
+         "projects": [
+             {
+                 "id": p.id, "slug": p.slug, "name": p.name,
+-                "primary_path": _primary_path(p), "active": p.id == active}
++                "primary_path": _primary_path(p), "readonly": p.readonly, "active": p.id == active}
+             for p in projects]})
+ 
+ 
+-def project_create(name: str, path: Optional[str] = None, task_id: Optional[str] = None) -> str:
++def project_create(name: str, path: Optional[str] = None, task_id: Optional[str] = None, readonly: bool = False) -> str:
+     name = (name or "").strip()
+     if not name:
+         return json.dumps({"success": False, "error": "name is required"})
+@@ -117,9 +117,11 @@
+                 # Idempotent create: the folder already belongs to a project. Reusing it beats minting
+                 # a duplicate — duplicated projects render N identical sidebar subtrees (#75820).
+                 from hermes_cli.workspace_projects.provision import provision_existing
++                if readonly and not existing.readonly:
++                    raise ValueError("The existing project is read-write.")
+                 proj = provision_existing(pdb, conn, existing)
+             else:
+-                pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None)
++                pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None, readonly=readonly)
+                 proj = pdb.get_project(conn, pid)
+             # A live session that moves owns its workspace, so it leaves the profile-global pointer
+             # alone (a background chat would otherwise redirect the sidebar). Anything that can't
+@@ -148,7 +150,7 @@
+ _ACTIONS = {
+     "list": lambda args, tid: project_list(task_id=tid),
+     "create": lambda args, tid: project_create(
+-        name=args.get("name", ""), path=args.get("path"), task_id=tid),
++        name=args.get("name", ""), path=args.get("path"), task_id=tid, readonly=args.get("readonly", False)),
+     "switch": lambda args, tid: project_switch(project=args.get("name", ""), task_id=tid)}
+ 
+ 
+@@ -179,6 +181,7 @@
+             "properties": {
+                 "action": {"type": "string", "enum": ["create", "switch", "list"]},
+                 "name": {"type": "string", "description": "create: human name. switch: name, slug, or id."},
++                "readonly": {"type": "boolean", "description": "create: observe committed sources with read-only CLI workers."},
+                 "path": {"type": "string", "description": "create: repo/folder to anchor to."},
+             },
+             "required": ["action"],
+--- a/apps/desktop/src/app/chat/sidebar/project-dialog.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-dialog.tsx
+@@ -48,6 +48,7 @@
+ 
+   const [name, setName] = useState('')
+   const [folders, setFolders] = useState<string[]>([])
++  const [readonly, setReadonly] = useState(false)
+   const [idea, setIdea] = useState('')
+   const [templates, setTemplates] = useState<ProjectIdeaTemplate[]>([])
+   const [generatingIdea, setGeneratingIdea] = useState(false)
+@@ -74,6 +75,7 @@
+     if (open) {
+       setName(state?.name ?? '')
+       setFolders([])
++      setReadonly(false)
+       setIdea('')
+       setTemplates(randomIdeaTemplates())
+       setGeneratingIdea(false)
+@@ -169,7 +171,8 @@
+         const created = await createProject({
+           dropPlacement,
+           folders,
+-          idea: idea.trim() || undefined,
++          idea: readonly ? undefined : idea.trim() || undefined,
++          readonly,
+           name: trimmed,
+           use: true
+         })
+@@ -282,6 +285,13 @@
+         )}
+ 
+         {mode === 'create' && (
++          <label className="flex items-center gap-2 text-sm">
++            <input type="checkbox" checked={readonly} disabled={submitting} onChange={event => setReadonly(event.target.checked)} />
++            읽기 전용 (Observer)
++          </label>
++        )}
++
++        {mode === 'create' && !readonly && (
+           <div className="flex flex-col gap-1.5">
+             <span className="text-[0.6875rem] font-medium text-(--ui-text-tertiary)">{p.ideaLabel}</span>
+             <div className="relative">
+--- a/apps/desktop/src/store/projects.ts
++++ b/apps/desktop/src/store/projects.ts
+@@ -1001,6 +1001,7 @@
+ }
+ 
+ export interface CreateProjectInput {
++  readonly?: boolean
+   name: string
+   folders?: string[]
+   primaryPath?: string
+@@ -1125,10 +1126,11 @@
+ 
+     res = await gatewayRequestOn<{ project: ProjectInfo | null }>(
+       context.gateway,
+-      'projects.create',
++      input.readonly ? 'projects.create_readonly' : 'projects.create',
+       projectParams(
+         {
+           name: input.name,
++          readonly: input.readonly,
+           folders: input.folders ?? [],
+           primary_path: input.primaryPath,
+           slug: input.slug,
+@@ -1143,7 +1145,7 @@
+     )
+   } catch (err) {
+     if (isMissingRpcMethod(err)) {
+-      if (context && stillOnWritableProjectOwner(context)) {
++      if (!input.readonly && context && stillOnWritableProjectOwner(context)) {
+         $projectsRpcAvailable.set(false)
+       }
+ 
+@@ -1173,7 +1175,7 @@
+   const created = res.project
+ 
+   if (created) {
+-    if (input.idea) {
++    if (input.idea && !created.readonly) {
+       void writeProjectIdea(created.primary_path ?? created.folders?.[0]?.path ?? input.primaryPath, input.idea)
+     }
+ 
+--- a/tui_gateway/contracts/projects_pets.py
++++ b/tui_gateway/contracts/projects_pets.py
+@@ -40,6 +40,7 @@
+     color: str | None = None
+     board_slug: str | None = None
+     primary_path: str | None = None
++    readonly: bool = False
+     archived: bool = False
+     created_at: int
+     folders: list[ProjectFolder] = Field(default_factory=list)
+@@ -83,11 +84,17 @@
+     icon: str | None = None
+     color: str | None = None
+     board_slug: str | None = None
++    readonly: bool = False
++    sources: list[str] | None = None
+     use: bool = False
+ 
+ 
+ method("projects.create", params=ProjectsCreateParams, result=OptionalProjectResult,
+        doc="Create a project from a name + folders; duplicate primary paths are refused (5063).")
++
++
++method("projects.create_readonly", params=ProjectsCreateParams, result=OptionalProjectResult,
++       doc="Create an observer project with a project-scoped read-only source policy.")
+ 
+ 
+ class ProjectsUpdateParams(ProjectIdParams):
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -2797,6 +2797,24 @@
+       }
+     },
+     {
++      "name": "projects.create_readonly",
++      "summary": "Create an observer project with a project-scoped read-only source policy.",
++      "params": [
++        {
++          "name": "params",
++          "schema": {
++            "$ref": "#/components/schemas/ProjectsCreateParams"
++          }
++        }
++      ],
++      "result": {
++        "name": "result",
++        "schema": {
++          "$ref": "#/components/schemas/OptionalProjectResult"
++        }
++      }
++    },
++    {
+       "name": "projects.delete",
+       "summary": "Permanently delete the project and its owned board, sessions and indexed knowledge after confirmation.",
+       "params": [
+@@ -32452,6 +32470,11 @@
+             "default": null,
+             "title": "Primary Path"
+           },
++          "readonly": {
++            "default": false,
++            "title": "Readonly",
++            "type": "boolean"
++          },
+           "archived": {
+             "default": false,
+             "title": "Archived",
+@@ -33224,6 +33247,26 @@
+             ],
+             "default": null,
+             "title": "Board Slug"
++          },
++          "readonly": {
++            "default": false,
++            "title": "Readonly",
++            "type": "boolean"
++          },
++          "sources": {
++            "anyOf": [
++              {
++                "items": {
++                  "type": "string"
++                },
++                "type": "array"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Sources"
+           },
+           "use": {
+             "default": false,
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -2557,6 +2557,7 @@
+   color?: string | null
+   board_slug?: string | null
+   primary_path?: string | null
++  readonly?: boolean
+   archived?: boolean
+   created_at: number
+   folders?: ProjectFolder[]
+@@ -2587,6 +2588,8 @@
+   icon?: string | null
+   color?: string | null
+   board_slug?: string | null
++  readonly?: boolean
++  sources?: string[] | null
+   use?: boolean
+ }
+ export interface OptionalProjectResult {
+@@ -6688,6 +6691,8 @@
+   'projects.archive': { params: ProjectsArchiveParams; result: ProjectsPayload }
+   /** Create a project from a name + folders; duplicate primary paths are refused (5063). */
+   'projects.create': { params: ProjectsCreateParams; result: OptionalProjectResult }
++  /** Create an observer project with a project-scoped read-only source policy. */
++  'projects.create_readonly': { params: ProjectsCreateParams; result: OptionalProjectResult }
+   /** Permanently delete the project and its owned board, sessions and indexed knowledge after confirmation. */
+   'projects.delete': { params: ProjectsDeleteParams; result: ProjectsPayload }
+   /** Repos for the desktop overview: scanned-from-disk (cached) ∪ session-derived. */
+@@ -7062,6 +7067,7 @@
+   'projects.add_folder',
+   'projects.archive',
+   'projects.create',
++  'projects.create_readonly',
+   'projects.delete',
+   'projects.discover_repos',
+   'projects.for_cwd',
+--- a/apps/desktop/src/types/hermes.ts
++++ b/apps/desktop/src/types/hermes.ts
+@@ -1205,6 +1205,7 @@
+ }
+ 
+ export interface ProjectInfo {
++  readonly?: boolean
+   id: string
+   slug: string
+   name: string
+--- a/hermes_cli/kanban_db_dispatch.py
++++ b/hermes_cli/kanban_db_dispatch.py
+@@ -2074,7 +2074,13 @@
+     # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
+     # it by assigning a profile, and health telemetry suppresses "stuck" for it.
+     profile_exists = _profile_exists_fn()
+-    if profile_exists is not None and not profile_exists(assignee):
++    from hermes_cli.workspace_projects.observer import requires_observer
++    skip = profile_exists is not None and not profile_exists(assignee)
++    detail = {"assignee": assignee}
++    if not skip and requires_observer(conn, task_id, board):
++        skip = True
++        detail["reason"] = "읽기 전용 프로젝트는 cli:codex 또는 cli:claude로 배정하세요."
++    if skip:
+         result.skipped_nonspawnable.append(task_id)
+         # Per-task diagnostic so ``show``/``tail`` name the missing profile instead of leaving
+         # the card in ``ready`` with zero board evidence (#122422). Unlike a respawn guard the
+@@ -2087,8 +2093,8 @@
+                     "SELECT kind, payload FROM task_events WHERE task_id = ? "
+                     "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
+                 if (last is None or last["kind"] != "skipped_nonspawnable"
+-                        or last["payload"] != _kb._json_or_null({"assignee": assignee})):
+-                    _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
++                        or last["payload"] != _kb._json_or_null(detail)):
++                    _kb._append_event(conn, task_id, "skipped_nonspawnable", detail)
+         return False
+     # Per-profile cap: one profile's local model / API quota / browser pool
+     # must not be overwhelmed by a fan-out even with global headroom.
+--- a/apps/desktop/src/app/chat/sidebar/project-dialog.test.tsx
++++ b/apps/desktop/src/app/chat/sidebar/project-dialog.test.tsx
+@@ -100,6 +100,18 @@
+ }
+ 
+ describe('ProjectDialog', () => {
++  it('creates a read-only project by name without writing the draft idea into the checkout', async () => {
++    render(<ProjectDialog />)
++    fireEvent.change(screen.getByPlaceholderText('Project name'), { target: { value: 'Review' } })
++    fireEvent.change(screen.getByPlaceholderText('What are you building?'), { target: { value: 'Draft' } })
++    fireEvent.click(screen.getByRole('checkbox', { name: '읽기 전용 (Observer)' }))
++    expect(screen.queryByPlaceholderText('What are you building?')).toBeNull()
++    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
++    await waitFor(() => expect(createProject).toHaveBeenCalledWith(
++      expect.objectContaining({ name: 'Review', folders: [], readonly: true, idea: undefined })
++    ))
++  })
++
+   it('creates from the folder basename and enters the created project when the name is empty', async () => {
+     render(<ProjectDialog />)
+ 
