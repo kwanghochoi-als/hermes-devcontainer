@@ -147,18 +147,26 @@ class ProjectCreation(unittest.TestCase):
                 run("git", "-c", "user.name=Fixture", "-c", "user.email=fixture@localhost",
                     "commit", "-qm", "test fixture", cwd=repo)
                 first = run("hermes", "project-cli", "submit", "codex", "check the contract", cwd=repo)
+
+                def wait_document(card):
+                    deadline = time.monotonic() + 60
+                    while time.monotonic() < deadline:
+                        indexed = rows(board / "kanban.db",
+                            "SELECT payload FROM task_events WHERE kind='knowledge_indexed' AND task_id=?", card)
+                        if indexed:
+                            return json.loads(indexed[0][0])["document"]
+                        time.sleep(0.2)
+                    self.fail(f"Missing indexed document for {card}")
+
+                first_uri = wait_document(first)
                 second = json.loads(run("hermes", "kanban", "--board", "test-prj", "create",
-                    "review in a worktree", "--assignee", "cli:claude", "--json"))["id"]
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline:
-                    receipts = rows(board / "kanban.db",
-                        "SELECT task_id,payload FROM task_events WHERE kind='knowledge_indexed'")
-                    if {r[0] for r in receipts} == {first, second}:
-                        break
-                    time.sleep(0.2)
-                else:
-                    self.fail(str(rows(board / "kanban.db", "SELECT id,status,last_failure_error FROM tasks")))
-                self.assertTrue(all(json.loads(r[1])["document"].startswith(f"qmd://{collection}/") for r in receipts))
+                    "review retry token in a worktree", "--assignee", "cli:claude", "--json"))["id"]
+                second_uri = wait_document(second)
+                prompt = (repo / ".worktrees" / second / ".probe-prompt").read_text()
+                self.assertIn(first_uri, prompt)
+                self.assertIn("rules.py verify_retry()", prompt)
+                self.assertIn(run("git", "rev-parse", "HEAD", cwd=repo), prompt)
+                self.assertTrue(all(uri.startswith(f"qmd://{collection}/") for uri in (first_uri, second_uri)))
                 expected = [(first, "done", project["id"], "dir"), (second, "done", project["id"], "worktree")]
                 self.assertEqual(rows(board / "kanban.db", "SELECT id,status,project_id,workspace_kind FROM tasks ORDER BY rowid"), expected)
                 self.assertEqual(rows(home / "kanban/boards/cli-workers/kanban.db", "SELECT count(*) FROM tasks"), [(0,)])

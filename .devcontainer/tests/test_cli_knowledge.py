@@ -27,8 +27,14 @@ class Embeddings(BaseHTTPRequestHandler):
             self.server.saw_failure.set()
             self.send_error(404, 'model temporarily unavailable')
             return
-        data = [{'index': i, 'object': 'embedding', 'embedding': [0.1, 0.2, 0.3, 0.4]}
-                for i in range(len(texts))]
+        def vector(text):
+            if 'RETRY_INVOICE' in text or 'billing backoff' in text:
+                return [1, 0, 0, 0]
+            if 'PICKUP_WINDOW' in text or 'parcel cutoff' in text:
+                return [0, 1, 0, 0]
+            return [0, 0, 1, 0]
+        data = [{'index': i, 'object': 'embedding', 'embedding': vector(text)}
+                for i, text in enumerate(texts)]
         body = json.dumps({'object': 'list', 'model': payload['model'], 'data': data}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -47,6 +53,42 @@ class KnowledgeRecovery(unittest.TestCase):
             if time.monotonic() >= deadline:
                 self.fail(description)
             time.sleep(0.2)
+
+    @unittest.skipUnless((Path.home() / '.local/share/hermes-qmd/bin/qmd').exists(), 'requires Dev Container QMD')
+    def test_bounded_recall_and_revision_only_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            qmd = Path(tmp) / 'qmd'
+            name = 'learned-fixture'
+            notes = qmd / 'knowledge' / name
+            notes.mkdir(parents=True)
+            env = dict(os.environ, XDG_CACHE_HOME=tmp, QMD_CONFIG_DIR=str(qmd))
+            env.pop('INDEX_PATH', None)
+            config = qmd / 'index.yml'
+            def configure(path):
+                config.write_text(json.dumps({'collections': {name: {'path': str(path), 'pattern': '*.md'}}}))
+            configure(notes)
+            sha = 'b' * 40
+            (notes / 'snapshot.md').write_text(f'# observer\n\n- 카드 · t_11111111 / 실행 1 / codex\n'
+                                               f'- 원격 main · repo · {sha}')
+            for i in range(5):
+                (notes / f'run{i}.md').write_text(f'# fixture\n\n## 확인한 사실\n\nmatched_token {i}\n\n근거 · rules.py')
+            binary = Path.home() / '.local/share/hermes-qmd/bin/qmd'
+            subprocess.run([binary, '--index', 'index', 'update'], env=env, cwd=tmp, check=True, capture_output=True)
+            script = Path(__file__).resolve().parents[1] / 'project-cli/index-knowledge.mjs'
+            def search(query):
+                return subprocess.run(['node', script, qmd, name, '--recall'], input=json.dumps(query),
+                                      env=env, text=True, capture_output=True, timeout=8)
+            refs = json.loads(search('matched_token').stdout)
+            self.assertEqual(len({ref['document'] for ref in refs}), 3)
+            self.assertTrue(all('rules.py' in ref['excerpt'] for ref in refs))
+            snapshot, = json.loads(search('t_11111111').stdout)
+            self.assertEqual(snapshot['document'], f'qmd://{name}/snapshot.md')
+            self.assertIn(f'원격 main · repo · {sha}', snapshot['source'])
+            self.assertEqual(snapshot['excerpt'], '')
+            configure(Path(tmp))
+            redirected = search('matched_token')
+            self.assertNotEqual(redirected.returncode, 0)
+            self.assertFalse(redirected.stdout.strip())
 
     @unittest.skipUnless((Path.home() / '.local/share/hermes-qmd/bin/qmd').exists(), 'requires Dev Container QMD')
     def test_indexing_is_scoped_durable_and_idempotent(self):
@@ -132,6 +174,46 @@ class KnowledgeRecovery(unittest.TestCase):
                 self.assertEqual(note.stat().st_mtime_ns, original_mtime)
                 with closing(sqlite3.connect(qmd / 'index.sqlite')) as index:
                     self.assertEqual(index.execute('SELECT count(*) FROM content_vectors').fetchone()[0], 2)
+
+                def start_card(project, engine, prompt):
+                    (project / '.probe-result.json').write_text(json.dumps({'knowledge': []}))
+                    card = cmd(project, 'submit', engine, prompt)
+                    self.wait_for(lambda: count('SELECT status FROM tasks WHERE id=?', card) == 'done', card)
+                    meta = json.loads(count('SELECT metadata FROM task_runs WHERE task_id=?', card))
+                    return (project / '.probe-prompt').read_text(), meta.get('knowledge_references', [])
+
+                # New sessions, opposite engines, and two unrelated checkouts both named app.
+                invoice_uri = f'qmd://{first_dir.name}/{note.name}'
+                prompt, refs = start_card(invoices, 'claude', 'billing backoff')
+                self.assertEqual(refs, [invoice_uri])
+                self.assertIn('RETRY_INVOICE', prompt)
+                self.assertIn('rules.py, RuleTest.test_contract passed', prompt)
+                self.assertNotIn('PICKUP_WINDOW', prompt)
+                prompt, refs = start_card(shipping, 'codex', 'parcel cutoff')
+                self.assertEqual(refs, [f'qmd://{second_dir.name}/{next(second_dir.glob("*.md")).name}'])
+                self.assertIn('PICKUP_WINDOW', prompt)
+                self.assertNotIn('RETRY_INVOICE', prompt)
+                prompt, refs = start_card(shipping, 'codex', 'billing backoff')
+                self.assertEqual(refs, [])
+                self.assertNotIn('Historical project references', prompt)
+
+                api.saw_failure.clear()
+                api.recovered.clear()
+                prompt, refs = start_card(invoices, 'codex', 'Investigate RETRY_INVOICE')
+                self.assertTrue(api.saw_failure.is_set())
+                self.assertEqual(refs, [invoice_uri])
+                self.assertIn('RuleTest.test_contract', prompt)
+                # With the index configuration unavailable the requested work still runs.
+                config = qmd / 'index.yml'
+                paused = config.with_suffix('.paused')
+                config.rename(paused)
+                try:
+                    prompt, refs = start_card(invoices, 'claude', 'RETRY_INVOICE')
+                    self.assertEqual(refs, [])
+                    self.assertNotIn('RuleTest.test_contract', prompt)
+                finally:
+                    paused.rename(config)
+                    api.recovered.set()
 
                 for status, expected in [('blocked', 'blocked'), ('completed', 'done')]:
                     report = {'status': status, 'knowledge': [] if status == 'completed' else [

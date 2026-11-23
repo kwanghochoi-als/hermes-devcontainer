@@ -1,4 +1,4 @@
-"""Publish worker-reported project findings from committed Kanban runs to QMD."""
+"""Publish verified worker findings and retrieve project references for new runs."""
 
 from collections import defaultdict
 from contextlib import contextmanager
@@ -42,6 +42,35 @@ def collection_name(workspace):
     label = re.sub(r"[^a-z0-9]+", "-", path.name.lower()).strip("-")[:48] or "project"
     suffix = hashlib.sha256(os.fsencode(path)).hexdigest()[:12]
     return f"learned-{label}-{suffix}"
+
+
+def recall(project, title, body):
+    """Find past findings in the same collection used when publishing this project's runs."""
+    name = collection_name(project)
+    qmd = get_hermes_home() / "qmd"
+    if not (qmd / "index.sqlite").is_file() or not (qmd / "knowledge" / name).is_dir():
+        return []
+    query = (body or "").strip()
+    if title and not query.startswith(title):
+        query = f"{title} {query}"
+    query = " ".join(query[:1000].split())[:600]
+    if not query:
+        return []
+    script = Path(__file__).with_name("index-knowledge.mjs")
+    try:
+        result = subprocess.run(
+            ["node", str(script), str(qmd), name, "--recall"], input=json.dumps(query),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True, timeout=8,
+            env=dict(os.environ, XDG_CACHE_HOME=str(qmd.parent), QMD_CONFIG_DIR=str(qmd)),
+        )
+        refs = json.loads(result.stdout)
+        if not isinstance(refs, list):
+            raise ValueError("Invalid QMD reference list")
+        return [ref for ref in refs if isinstance(ref, dict) and isinstance(ref.get("document"), str)
+                and ref["document"].startswith(f"qmd://{name}/") and (ref.get("excerpt") or ref.get("source"))][:3]
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        print(f"QMD {name} 참고 자료 없이 작업 시작 · {type(exc).__name__}", file=sys.stderr, flush=True)
+        return []
 
 
 def search_scope(cwd=None, *, all_projects=False):
