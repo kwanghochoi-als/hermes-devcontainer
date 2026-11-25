@@ -124,7 +124,17 @@
          # unbounded; only complete_task clears them. ``consecutive_failures``
 --- a/hermes_cli/kanban_db_dispatch.py
 +++ b/hermes_cli/kanban_db_dispatch.py
-@@ -2074,7 +2074,16 @@
+@@ -2000,6 +2000,9 @@
+     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
+     resolved DB path so unrelated boards tick in parallel.
+     """
++    if (_kb.kanban_home() / ".devcontainer-release").exists():
++        return DispatchResult(skipped_locked=True)
++
+     def _locked_tick() -> DispatchResult:
+         return _dispatch_once_locked(
+             conn,
+@@ -2074,7 +2077,16 @@
      # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
      # it by assigning a profile, and health telemetry suppresses "stuck" for it.
      profile_exists = _profile_exists_fn()

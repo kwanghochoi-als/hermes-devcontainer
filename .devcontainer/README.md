@@ -171,7 +171,7 @@ Git 커밋을 확정하면 Kanban 실행 이벤트에 저장소별 SHA를 기록
 
 ## 초기 설치
 
-VS Code에서 **Dev Containers: Rebuild Container**를 실행하면 Docker Compose가 영속 볼륨을 만들거나 기존 볼륨을 연결합니다. 초기 설치가 끝나면 아래 순서로 두 CLI와 Hermes를 인증합니다.
+VS Code에서 **Dev Containers: Rebuild Container**를 실행하면 Docker Compose가 영속 볼륨을 만들거나 기존 볼륨을 연결합니다. 첫 기동에서 실제 Hermes 볼륨명을 이 체크아웃의 `.devcontainer/.env`에 저장합니다. 다음 리빌드에서는 Compose가 해당 볼륨을 외부 볼륨으로 연결합니다. 새 셸에서도 같은 선택이 적용되며, 볼륨이 없거나 실제 마운트가 다르면 기동이 중단됩니다. 초기 설치가 끝나면 아래 순서로 두 CLI와 Hermes를 인증합니다.
 
 초기 설치는 `.devcontainer/hermes-revision`에 적힌 전체 Git SHA의 공식 설치 스크립트와 소스를 사용합니다. 영속 볼륨에서도 같은 SHA를 확인한 뒤 연동 코드를 적용하고 웹앱을 빌드합니다. 프로필의 `plugins/project-cli`가 워커·텔레그램·QMD·프로젝트 정책을 제공합니다. Hermes는 활성 프로필에 등록된 플러그인을 불러옵니다.
 
@@ -183,7 +183,7 @@ hermes project-cli observer-check
 
 ### Hermes 버전 변경 및 복구
 
-1. 후보 버전은 운영 저장소의 별도 체크아웃에서 검증합니다. `.devcontainer/hermes-revision`에 후보의 40자리 SHA를 기록하고 `project-cli/plugin.yaml`의 Hermes 버전 범위를 확인합니다. 호스트에서 별도 Compose 프로젝트 이름, 컨트롤러 이름, 빈 볼륨을 지정해 이 체크아웃을 devcontainer로 엽니다. 예를 들어 `COMPOSE_PROJECT_NAME=hermes-trial`, `HERMES_CLI_CONTROLLER=agent-cli-trial`, `HERMES_HOME_VOLUME=hermes-trial-home`을 사용합니다. 검증은 로컬 테스트 봇과 임시 Git 저장소·QMD 컬렉션을 사용합니다.
+1. 후보 버전은 운영 저장소의 별도 체크아웃에서 검증합니다. `.devcontainer/hermes-revision`에 후보의 40자리 SHA를 기록하고 `project-cli/plugin.yaml`의 Hermes 버전 범위를 확인합니다. 후보 체크아웃의 `.devcontainer/.env`에 별도 Compose 프로젝트 이름, 컨트롤러 이름, 빈 볼륨을 지정해 devcontainer로 엽니다. 예를 들어 `COMPOSE_PROJECT_NAME=hermes-trial`, `HERMES_CLI_CONTROLLER=agent-cli-trial`, `HERMES_HOME_VOLUME=hermes-trial-home`을 각각 한 줄씩 사용합니다. 검증은 로컬 테스트 봇과 임시 Git 저장소·QMD 컬렉션을 사용합니다.
 2. 후보 컨테이너에서 아래 명령을 실행합니다. 첫 명령은 지정된 Git 커밋으로 임시 트리를 구성해 패치와 공식 RPC 코드 생성을 검사합니다. 두 번째 명령은 설치된 결과, 플러그인, 웹앱 빌드, 프로젝트와 승인 흐름, 읽기 전용 Git 워커를 검증합니다. 생성·삭제 시 원본 보존, 두 CLI의 재시도, 이미 처리한 Telegram 응답, QMD 장애 복구까지 포함합니다.
 
    ```bash
@@ -191,7 +191,7 @@ hermes project-cli observer-check
    bash .devcontainer/verify-hermes.sh
    ```
 
-3. 운영 전환 시 실행 중인 작업을 마치고 운영 컨테이너를 중지합니다. 운영 설정 저장소의 Git SHA, Hermes SHA, 원본 `hermes_home` 볼륨명을 함께 기록합니다. 중지된 볼륨의 사본에 새 버전을 적용하면 기존 코드·데이터 조합으로 돌아갈 수 있습니다. 아래는 호스트의 운영 설정 저장소에서 실행하는 예시입니다. `agent-cli`는 실제 운영 컨테이너명으로, `$PWD`는 검증을 마친 설정 저장소 경로로 지정합니다.
+3. 운영 전환 전에는 실행 중인 작업을 마치고 호스트에서 운영 컨테이너를 중지합니다. 운영 설정 저장소의 Git SHA, Hermes SHA, 원본 볼륨명을 기록합니다. 아래는 호스트의 운영 설정 저장소에서 원본을 복제하고 사본의 Hermes 코드를 변경하는 예시입니다. `agent-cli`와 `$PWD`에는 실제 컨트롤러 이름과 검증한 설정 저장소 경로를 사용합니다. 호스트에는 Docker와 Python 3가 필요합니다.
 
    ```bash
    controller=agent-cli
@@ -201,6 +201,7 @@ hermes project-cli observer-check
    next_volume=$(docker volume create)
    docker run --rm --user 0 --entrypoint sh \
      -v "$original:/source:ro" -v "$next_volume:/target" "$image" -ec 'cp -a /source/. /target/'
+   python3 .devcontainer/hermes_volume.py select "$next_volume" --controller "$controller"
    docker run --rm --user ubuntu --entrypoint bash \
      -v "$PWD:/workspaces:ro" -v "$next_volume:/home/ubuntu/.hermes" "$image" -ec '
        cd /workspaces
@@ -211,10 +212,18 @@ hermes project-cli observer-check
        git -C "$repo" fetch origin "$target"
        git -C "$repo" switch --detach "$target"
      '
-   export HERMES_HOME_VOLUME="$next_volume"
    ```
 
-   위 환경 변수를 설정한 호스트 환경에서 운영 devcontainer를 **Rebuild Container**로 기동합니다. `bash .devcontainer/verify-hermes.sh`와 `bash .devcontainer/start-service.sh status`로 확인한 뒤 작업을 재개합니다. 복구할 때는 컨테이너를 중지하고 기록한 운영 설정 Git SHA와 원본 볼륨을 `HERMES_HOME_VOLUME`으로 선택해 리빌드합니다. 전환 후 새 볼륨에 들어온 세션과 카드는 그 볼륨에서 조회할 수 있습니다.
+   `select`는 두 볼륨을 사용하는 컨테이너와 해당 컨트롤러의 CLI 작업이 중지됐는지 확인합니다. 기본 보드와 프로젝트별 보드의 카드·시도·이벤트, Telegram 요청·응답·보고 기록을 대조한 뒤 원본은 보관하고 사본은 검증 대기로 표시합니다. 선택은 `.devcontainer/.env`의 `HERMES_SELECTED_HOME_VOLUME`에 저장되며 이전 셸의 `HERMES_HOME_VOLUME`보다 우선합니다. 이후 **Rebuild Container**를 실행합니다.
+
+4. 리빌드한 devcontainer 셸에서 다음을 실행합니다. 검증 대기 중에는 서비스 관리자가 Hermes 게이트웨이와 칸반 워커의 실행 잠금을 확보합니다. 대시보드나 CLI에서 직접 칸반 배정을 실행해도 카드는 대기열에 남습니다. `resume`은 설치·회귀 검증을 통과한 뒤 잠금을 풀고 Telegram 수신과 카드 실행을 재개합니다. 검증에 실패하면 대기 상태가 유지되며 원인을 수정한 뒤 같은 명령으로 재시도할 수 있습니다.
+
+   ```bash
+   bash .devcontainer/start-service.sh status
+   bash .devcontainer/start-service.sh resume
+   ```
+
+5. 복구 시에는 컨트롤러를 중지한 뒤 호스트에서 `python3 .devcontainer/hermes_volume.py select "$original" --controller "$controller"`를 실행합니다. 기록이 일치하면 이전 Hermes SHA와 호환되는 설정으로 리빌드하고 `resume`합니다. 전환 후 카드가 실행됐거나 승인이 처리돼 기록이 달라졌으면 선택이 중단되고 차이가 난 보드·테이블이 표시됩니다. 이때는 가장 최근 운영 볼륨의 사본에 이전 Hermes 코드를 적용해 같은 절차로 검증합니다. 데이터 형식이 호환되지 않으면 두 볼륨을 보관한 채 표시된 기록을 대조·복구합니다. 롤백에 사용하는 devcontainer 설정에도 이 볼륨 선택 및 기동 절차가 포함돼 있어야 합니다.
 
 `--restore-upstream`은 설치기가 기록한 파일만 해당 Hermes 커밋의 원본으로 되돌립니다. 관리 파일에 별도 편집이 있으면 경로를 표시하고 적용 전에 멈춥니다. 프로젝트 생성·삭제의 소유권 처리, 읽기 전용 카드의 기본 디스패치 차단과 분해 시점, 로컬 자료 요청 연결에는 코어 패치가 남습니다. 버전을 바꿀 때는 이 경로를 우선 확인합니다.
 

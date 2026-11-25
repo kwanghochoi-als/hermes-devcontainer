@@ -369,6 +369,8 @@ def process_card(card_id, lock_fd, slug):
 
 
 def serve():
+    if (get_hermes_home() / ".devcontainer-release").exists():
+        raise SystemExit("Hermes 볼륨 전환 중입니다. 검증 후 칸반 워커가 재개됩니다.")
     state = get_hermes_home() / "cli-workers"
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     for name in ("locks", "sessions", "runs"):

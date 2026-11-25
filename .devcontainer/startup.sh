@@ -9,6 +9,11 @@ export PATH="$checkout/.hermes/bin:$HOME/.local/bin:$PATH"
 
 log()  { printf '\n\033[1;36m[startup]\033[0m %s\n' "$*"; }
 
+log "Hermes 영속 볼륨과 설치 버전 확인"
+python3 "$here/hermes_volume.py" pin
+bash "$here/start-service.sh" reserve
+if [[ -e "$checkout" ]]; then bash "$here/start-service.sh" check-revision; fi
+
 log "Claude Code 설치"
 command -v claude >/dev/null || curl -fsSL https://claude.ai/install.sh | bash
 
@@ -17,10 +22,6 @@ command -v codex >/dev/null || npm install -g @openai/codex
 codex --version
 
 log "Hermes Agent 설치 버전 확인 · $revision"
-if [[ -e "$checkout" && "$(git -C "$checkout" rev-parse HEAD)" != "$revision" ]]; then
-  echo "영속 볼륨의 Hermes 커밋이 다릅니다. .devcontainer/README.md의 Hermes 버전 변경 절차를 확인하세요." >&2
-  exit 1
-fi
 if [[ ! -x "$checkout/.hermes/bin/hermes" ]]; then
   curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/$revision/scripts/install.sh" |
     bash -s -- --non-interactive --commit "$revision" --dir "$checkout" --hermes-home "$profile_dir"

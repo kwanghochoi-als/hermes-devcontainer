@@ -4,3 +4,5 @@
 !/.github/
 
 __pycache__/
+/.devcontainer/.env
+/.devcontainer/.hermes-volume.lock
